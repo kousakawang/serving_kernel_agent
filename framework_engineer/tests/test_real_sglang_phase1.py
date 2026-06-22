@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -7,44 +8,98 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _enabled() -> bool:
-    return os.environ.get("KA_REAL_SGLANG") == "1"
+@dataclass
+class RealSGLangConfig:
+    service_cmd: str
+    workload_cmd: str
+    target_file: str
+    function_name: str
+    target_name: str
+
+    task_id: str = "real_sglang_phase1"
+    task_pack: str | None = None
+    keep_task_pack: bool = True
+    skip_baseline: bool = False
+
+    non_cudagraph_service_cmd: str | None = None
+    health_url: str | None = None
+    startup_timeout: int = 240
+    workload_timeout: int = 1200
+    test_timeout: int = 3600
+
+    signature: str = "candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)"
+    target_mode: str = ""
+    target_backend: str = ""
+    target_layer_id: str = ""
+    drop_first_arg: bool = True
+    mutable_arg_paths: list[str] = field(default_factory=lambda: ["kwargs.ssm_states"])
+
+    max_raw_cases: int = 32
+    max_selected_cases: int | None = 8
+
+    run_probe_env: bool = False
+    skip_env_check: bool = True
+    run_benchmark: bool = False
+    validate_device: str = "cuda"
+    validate_warmup: int = 3
+    validate_repeat: int = 5
+
+    extra_env: dict[str, str] = field(default_factory=dict)
 
 
-def _required_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise unittest.SkipTest(f"{name} is required when KA_REAL_SGLANG=1")
-    return value
+def _load_config() -> RealSGLangConfig:
+    config_path = os.environ.get("KA_REAL_SGLANG_CONFIG")
+    if not config_path:
+        raise unittest.SkipTest("Set KA_REAL_SGLANG_CONFIG=/path/to/real_sglang_phase1_config.py")
+    path = Path(config_path).expanduser().resolve()
+    if not path.exists():
+        raise unittest.SkipTest(f"KA_REAL_SGLANG_CONFIG does not exist: {path}")
+
+    spec = importlib.util.spec_from_file_location("ka_real_sglang_config", path)
+    if spec is None or spec.loader is None:
+        raise unittest.SkipTest(f"Cannot import config file: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    if hasattr(module, "CONFIG"):
+        raw = getattr(module, "CONFIG")
+        if not isinstance(raw, dict):
+            raise TypeError("CONFIG must be a dict when provided")
+    else:
+        raw = {
+            key: getattr(module, key)
+            for key in dir(module)
+            if key.islower() and not key.startswith("_")
+        }
+
+    required = ["service_cmd", "workload_cmd", "target_file", "function_name", "target_name"]
+    missing = [name for name in required if not raw.get(name)]
+    if missing:
+        raise unittest.SkipTest(f"Missing required config fields: {', '.join(missing)}")
+    return RealSGLangConfig(**raw)
 
 
-@unittest.skipUnless(_enabled(), "Set KA_REAL_SGLANG=1 to run real SGLang integration tests")
 class RealSGLangPhase1CliTests(unittest.TestCase):
-    """Run the Framework Engineer CLI against a real SGLang/workload target.
+    """Run the Framework Engineer CLI against a real SGLang/workload target."""
 
-    This test is intentionally environment-driven. It does not know the user's
-    SGLang checkout or model path; the caller provides commands and target
-    source file through environment variables.
-    """
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cfg = _load_config()
 
     def test_real_sglang_snapshot_task_pack_flow(self) -> None:
-        service_cmd = _required_env("KA_SERVICE_CMD")
-        workload_cmd = _required_env("KA_WORKLOAD_CMD")
-        target_file = _required_env("KA_TARGET_FILE")
-        function_name = _required_env("KA_FUNCTION_NAME")
-        target_name = _required_env("KA_TARGET_NAME")
+        cfg: RealSGLangConfig = self.cfg
 
-        keep = os.environ.get("KA_KEEP_TASK_PACK") == "1"
-        provided_task_pack = os.environ.get("KA_TASK_PACK")
         tmpdir: str | None = None
-        if provided_task_pack:
-            task_pack = Path(provided_task_pack).resolve()
+        if cfg.task_pack:
+            task_pack = Path(cfg.task_pack).expanduser().resolve()
         else:
             tmpdir = tempfile.mkdtemp(prefix="ka_real_sglang_")
             task_pack = Path(tmpdir) / "task_pack"
@@ -54,21 +109,21 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
             self._run_cli(
                 "scaffold-task-pack",
                 "--task-id",
-                os.environ.get("KA_TASK_ID", "real_sglang_phase1"),
+                cfg.task_id,
                 "--out",
                 str(task_pack),
                 "--force",
             )
 
-            if os.environ.get("KA_SKIP_BASELINE") != "1":
+            if not cfg.skip_baseline:
                 self._run_cli(
                     "run-baseline",
                     "--task-pack",
                     str(task_pack),
                     "--service-cmd",
-                    service_cmd,
+                    cfg.service_cmd,
                     "--workload-cmd",
-                    workload_cmd,
+                    cfg.workload_cmd,
                     *self._service_args(),
                 )
 
@@ -77,15 +132,15 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                 "--task-pack",
                 str(task_pack),
                 "--service-cmd",
-                self._non_cudagraph_service_cmd(service_cmd),
+                self._non_cudagraph_service_cmd(cfg.service_cmd),
                 "--workload-cmd",
-                workload_cmd,
+                cfg.workload_cmd,
                 "--target-file",
-                target_file,
+                cfg.target_file,
                 "--function-name",
-                function_name,
+                cfg.function_name,
                 "--target-name",
-                target_name,
+                cfg.target_name,
                 *self._drop_first_arg(),
                 *self._service_args(),
             )
@@ -96,28 +151,25 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                 "--task-pack",
                 str(task_pack),
                 "--service-cmd",
-                self._non_cudagraph_service_cmd(service_cmd),
+                self._non_cudagraph_service_cmd(cfg.service_cmd),
                 "--workload-cmd",
-                workload_cmd,
+                cfg.workload_cmd,
                 "--target-file",
-                target_file,
+                cfg.target_file,
                 "--function-name",
-                function_name,
+                cfg.function_name,
                 "--target-name",
-                target_name,
+                cfg.target_name,
                 "--signature",
-                os.environ.get(
-                    "KA_SIGNATURE",
-                    "candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)",
-                ),
+                cfg.signature,
                 "--mode",
-                os.environ.get("KA_TARGET_MODE", ""),
+                cfg.target_mode,
                 "--backend",
-                os.environ.get("KA_TARGET_BACKEND", ""),
+                cfg.target_backend,
                 "--layer-id",
-                os.environ.get("KA_TARGET_LAYER_ID", ""),
+                cfg.target_layer_id,
                 "--max-raw-cases",
-                os.environ.get("KA_MAX_RAW_CASES", "32"),
+                str(cfg.max_raw_cases),
                 *self._mutable_arg_args(),
                 *self._drop_first_arg(),
                 *self._service_args(),
@@ -134,7 +186,7 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
 
             self._run_cli("generate-harness", "--task-pack", str(task_pack))
 
-            if os.environ.get("KA_RUN_PROBE_ENV") == "1":
+            if cfg.run_probe_env:
                 self._run_cli("probe-env", "--task-pack", str(task_pack))
 
             validate_args = [
@@ -143,17 +195,17 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                 str(task_pack),
                 "--run-correctness",
             ]
-            if os.environ.get("KA_RUN_BENCHMARK") == "1":
+            if cfg.run_benchmark:
                 validate_args.append("--run-benchmark")
-            if os.environ.get("KA_RUN_PROBE_ENV") != "1" or os.environ.get("KA_SKIP_ENV_CHECK") == "1":
+            if not cfg.run_probe_env or cfg.skip_env_check:
                 validate_args.append("--skip-env-check")
 
             validate = self._run_cli(
                 *validate_args,
                 extra_env={
-                    "DEVICE": os.environ.get("KA_VALIDATE_DEVICE", "cuda"),
-                    "WARMUP": os.environ.get("KA_VALIDATE_WARMUP", "3"),
-                    "REPEAT": os.environ.get("KA_VALIDATE_REPEAT", "5"),
+                    "DEVICE": cfg.validate_device,
+                    "WARMUP": str(cfg.validate_warmup),
+                    "REPEAT": str(cfg.validate_repeat),
                     "PYTHON": sys.executable,
                 },
             )
@@ -162,14 +214,16 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
             manifest = json.loads((task_pack / "snapshots" / "manifest.json").read_text(encoding="utf-8"))
             self.assertGreater(manifest["selected_case_count"], 0)
         finally:
-            if tmpdir and not keep:
+            if tmpdir and not cfg.keep_task_pack:
                 shutil.rmtree(tmpdir, ignore_errors=True)
-            elif keep:
+            elif cfg.keep_task_pack:
                 print(f"[ka-real] kept task_pack={task_pack}")
 
     def _run_cli(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
+        cfg: RealSGLangConfig = self.cfg
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join([str(PROJECT_ROOT), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+        env.update(cfg.extra_env)
         if extra_env:
             env.update(extra_env)
         proc = subprocess.run(
@@ -180,7 +234,7 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=int(os.environ.get("KA_TEST_TIMEOUT", "3600")),
+            timeout=cfg.test_timeout,
         )
         if proc.stdout:
             print(proc.stdout)
@@ -192,36 +246,34 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
         return json.loads(lines[-1])
 
     def _service_args(self) -> list[str]:
+        cfg: RealSGLangConfig = self.cfg
         args: list[str] = [
             "--startup-timeout",
-            os.environ.get("KA_STARTUP_TIMEOUT", "240"),
+            str(cfg.startup_timeout),
             "--workload-timeout",
-            os.environ.get("KA_WORKLOAD_TIMEOUT", "1200"),
+            str(cfg.workload_timeout),
         ]
-        if os.environ.get("KA_HEALTH_URL"):
-            args.extend(["--health-url", os.environ["KA_HEALTH_URL"]])
+        if cfg.health_url:
+            args.extend(["--health-url", cfg.health_url])
         return args
 
     def _drop_first_arg(self) -> list[str]:
-        if os.environ.get("KA_DROP_FIRST_ARG", "1") == "1":
-            return ["--drop-first-arg"]
-        return []
+        return ["--drop-first-arg"] if self.cfg.drop_first_arg else []
 
     def _mutable_arg_args(self) -> list[str]:
-        paths = [p.strip() for p in os.environ.get("KA_MUTABLE_ARG_PATHS", "kwargs.ssm_states").split(",") if p.strip()]
         args: list[str] = []
-        for path in paths:
+        for path in self.cfg.mutable_arg_paths:
             args.extend(["--mutable-arg-path", path])
         return args
 
     def _max_cases_args(self) -> list[str]:
-        if os.environ.get("KA_MAX_SELECTED_CASES"):
-            return ["--max-cases", os.environ["KA_MAX_SELECTED_CASES"]]
+        if self.cfg.max_selected_cases is not None:
+            return ["--max-cases", str(self.cfg.max_selected_cases)]
         return []
 
     def _non_cudagraph_service_cmd(self, service_cmd: str) -> str:
-        if os.environ.get("KA_NON_CUDAGRAPH_SERVICE_CMD"):
-            return os.environ["KA_NON_CUDAGRAPH_SERVICE_CMD"]
+        if self.cfg.non_cudagraph_service_cmd:
+            return self.cfg.non_cudagraph_service_cmd
         if "--disable-cuda-graph" in service_cmd:
             return service_cmd
         return service_cmd + " --disable-cuda-graph"

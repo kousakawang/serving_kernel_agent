@@ -78,50 +78,31 @@ python3 -m kernel_agent.framework_engineer.cli validate-task-pack \
 
 ## 5. 真实 SGLang 集成测试
 
-这组测试默认跳过。你需要在真实 GPU/SGLang 环境里显式开启：
+这组测试默认跳过。你只需要提供一个 Python 配置文件：
 
 ```bash
-export KA_REAL_SGLANG=1
-export KA_SERVICE_CMD='python -m sglang.launch_server ...'
-export KA_WORKLOAD_CMD='python run_your_workload.py ...'
-export KA_TARGET_FILE='/path/to/sglang/python/sglang/srt/layers/attention/linear/kernels/gdn_triton.py'
-export KA_FUNCTION_NAME='extend'
-export KA_TARGET_NAME='sglang.srt.layers.attention.linear.kernels.gdn_triton.TritonGDNKernel.extend'
+cp kernel_agent/framework_engineer/tests/real_sglang_phase1_config.example.py \
+  /tmp/real_sglang_phase1_config.py
 
+# 编辑 /tmp/real_sglang_phase1_config.py
+
+KA_REAL_SGLANG_CONFIG=/tmp/real_sglang_phase1_config.py \
 python3 -m unittest kernel_agent.framework_engineer.tests.test_real_sglang_phase1
 ```
 
-常用可选项：
+配置文件是普通 Python 文件，必填字段：
 
-```bash
-# 如果目标是 instance method，默认就是 1；普通函数可设为 0
-export KA_DROP_FIRST_ARG=1
-
-# 多个 mutable path 用逗号分隔
-export KA_MUTABLE_ARG_PATHS='kwargs.ssm_states'
-
-# 捕获 raw snapshot 上限，避免 workload 太大时写爆磁盘
-export KA_MAX_RAW_CASES=32
-
-# selected case 上限
-export KA_MAX_SELECTED_CASES=8
-
-# 如果默认追加 --disable-cuda-graph 不适合你的启动命令，显式提供 non-cudagraph 命令
-export KA_NON_CUDAGRAPH_SERVICE_CMD='python -m sglang.launch_server ... --disable-cuda-graph'
-
-# 保留临时 task pack，便于手动检查
-export KA_KEEP_TASK_PACK=1
-
-# 指定输出目录；如果设置了这个目录，测试不会自动删除
-export KA_TASK_PACK=/tmp/qwen35_gdn_extend_task_pack
-
-# 跑环境探测和 benchmark
-export KA_RUN_PROBE_ENV=1
-export KA_RUN_BENCHMARK=1
-
-# validate 使用的设备，默认 cuda
-export KA_VALIDATE_DEVICE=cuda
+```python
+service_cmd = "python -m sglang.launch_server ..."
+workload_cmd = "python run_your_workload.py ..."
+target_file = "/path/to/gdn_triton.py"
+function_name = "extend"
+target_name = "sglang...TritonGDNKernel.extend"
 ```
+
+完整模板见：
+
+- `kernel_agent/framework_engineer/tests/real_sglang_phase1_config.example.py`
 
 测试流程：
 
@@ -136,8 +117,12 @@ export KA_VALIDATE_DEVICE=cuda
 
 如果当前只想测试 snapshot/harness，不想跑 baseline：
 
-```bash
-export KA_SKIP_BASELINE=1
+```python
+skip_baseline = True
 ```
 
 如果 `--disable-cuda-graph` 追加策略不适合你的 SGLang 版本，务必使用 `KA_NON_CUDAGRAPH_SERVICE_CMD` 覆盖。
+
+```python
+non_cudagraph_service_cmd = "python -m sglang.launch_server ... --disable-cuda-graph"
+```

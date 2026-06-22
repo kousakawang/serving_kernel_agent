@@ -1,0 +1,71 @@
+"""Example config for test_real_sglang_phase1.py.
+
+Copy this file to a server-local path, edit values, then run:
+
+    KA_REAL_SGLANG_CONFIG=/path/to/real_sglang_phase1_config.py \
+      python3 -m unittest kernel_agent.framework_engineer.tests.test_real_sglang_phase1
+"""
+
+# Required.
+service_cmd = """
+python -m sglang.launch_server \
+  --model-path /path/to/Qwen3.5 \
+  --host 127.0.0.1 \
+  --port 30000
+""".strip()
+
+workload_cmd = """
+python /path/to/run_your_workload.py \
+  --endpoint http://127.0.0.1:30000
+""".strip()
+
+target_file = "/path/to/sglang/python/sglang/srt/layers/attention/linear/kernels/gdn_triton.py"
+function_name = "extend"
+target_name = "sglang.srt.layers.attention.linear.kernels.gdn_triton.TritonGDNKernel.extend"
+
+# Optional task output.
+task_id = "qwen35_gdn_extend_core_h20_real"
+task_pack = "/tmp/qwen35_gdn_extend_task_pack"
+keep_task_pack = True
+skip_baseline = False
+
+# Optional service controls.
+health_url = "http://127.0.0.1:30000/health"
+startup_timeout = 240
+workload_timeout = 1200
+test_timeout = 3600
+
+# If appending --disable-cuda-graph to service_cmd is wrong for your setup,
+# provide the exact non-cudagraph launch command here.
+non_cudagraph_service_cmd = service_cmd + " --disable-cuda-graph"
+
+# Target ABI/capture controls.
+signature = "candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)"
+target_mode = "extend"
+target_backend = "triton"
+target_layer_id = ""
+
+# Set False if target function is not an instance/class method.
+drop_first_arg = True
+
+# Multiple paths are allowed, for example:
+# mutable_arg_paths = ["kwargs.ssm_states", "kwargs.conv_states"]
+mutable_arg_paths = ["kwargs.ssm_states"]
+
+max_raw_cases = 32
+max_selected_cases = 8
+
+# Validation controls.
+run_probe_env = False
+skip_env_check = True
+run_benchmark = False
+validate_device = "cuda"
+validate_warmup = 3
+validate_repeat = 5
+
+# Extra env vars passed to service/workload/CLI subprocesses.
+extra_env = {
+    # "CUDA_VISIBLE_DEVICES": "0",
+    # "PYTHONPATH": "/path/to/sglang/python",
+}
+
