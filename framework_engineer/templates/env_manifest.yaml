@@ -1,0 +1,99 @@
+task_id: "qwen35_gdn_extend_core_h20_YYYYMMDD"
+generated_by: "framework_engineer"
+
+python:
+  executable: ""
+  version: ""
+
+pytorch:
+  import_ok: null
+  version: ""
+  cuda_version: ""
+  check_command: "python - <<'PY'\nimport torch\nprint(torch.__version__)\nprint(torch.version.cuda)\nprint(torch.cuda.is_available())\nPY"
+  output_summary: ""
+
+gpu:
+  name: ""
+  count: null
+  compute_capability: ""
+  memory_gb: null
+  check_command: "python - <<'PY'\nimport torch\np=torch.cuda.get_device_properties(0)\nprint(p.name, p.major, p.minor, p.total_memory)\nPY"
+  output_summary: ""
+
+triton:
+  available: null
+  usable_for_task: null
+  version: ""
+  check_command: "python - <<'PY'\nimport triton\nprint(triton.__version__)\nPY"
+  proof_command: "python env_probe/probe_triton.py"
+  output_summary: ""
+
+cuda_toolchain:
+  nvcc_available: null
+  nvcc_path: ""
+  nvcc_version: ""
+  cuda_home: ""
+  ptxas_path: ""
+  check_command: "which nvcc || true; nvcc --version || true; which ptxas || true"
+  output_summary: ""
+
+profilers:
+  ncu:
+    available: null
+    path: ""
+    version: ""
+    check_command: "which ncu || true; ncu --version || true"
+    output_summary: ""
+  nsys:
+    available: null
+    path: ""
+    version: ""
+    check_command: "which nsys || true; nsys --version || true"
+    output_summary: ""
+
+libraries:
+  flashinfer:
+    available: null
+    check_command: "python - <<'PY'\nimport flashinfer\nprint(getattr(flashinfer, '__version__', 'unknown'))\nPY"
+    output_summary: ""
+  cutlass:
+    available: null
+    usable_for_task: null
+    include_paths: []
+    library_paths: []
+    proof_command: ""
+    output_summary: ""
+  cutedsl:
+    available: null
+    usable_for_task: null
+    check_command: "python - <<'PY'\nimport cutlass\nprint('cutedsl/cutlass import ok')\nPY"
+    proof_command: "python env_probe/probe_cutedsl.py"
+    output_summary: ""
+  cublas:
+    available: null
+    library_paths: []
+    output_summary: ""
+  cudnn:
+    available: null
+    library_paths: []
+    output_summary: ""
+
+dependency_policy:
+  kernel_engineer_may_install_packages: false
+  allowed_paths_only: true
+  notes: "Kernel Engineer may only use capabilities marked available in this manifest."
+
+implementation_policy:
+  preferred_jit_paths:
+    - "Triton if available=true and usable_for_task=true"
+    - "CuTe DSL if available=true and usable_for_task=true"
+  escalation_paths:
+    - "CUDA extension when JIT paths hit a clear bottleneck or need unsupported low-level control"
+    - "CUTLASS/C++ integration when the ABI matches and env_manifest proves headers/libs/build path"
+  library_call_policy:
+    - "Direct cuBLAS/cuDNN/CUTLASS calls are not first-line for this Phase 1 task unless the task ABI naturally maps to them."
+    - "Using an existing library must still preserve the candidate_impl.py ABI and benchmark harness."
+  notes: |
+    Do not mark CuTe DSL unusable only because a specific existing SGLang backend
+    path falls back on this GPU. For custom kernels, CuTe DSL can be a valid SM90
+    implementation path if the probe compiles and runs a minimal task-like kernel.
