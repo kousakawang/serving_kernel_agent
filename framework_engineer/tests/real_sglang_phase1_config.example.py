@@ -63,9 +63,23 @@ validate_device = "cuda"
 validate_warmup = 3
 validate_repeat = 5
 
+# Per-CLI switches. Keys are exact CLI subcommand names.
+# Missing keys default to True. You are responsible for dependency correctness
+# when skipping steps; for example, skipping capture-snapshots requires existing
+# raw snapshots if select-snapshots remains enabled.
+cli_tests = {
+    "scaffold-task-pack": True,
+    "run-baseline": True,
+    "probe-target-calls": True,
+    "capture-snapshots": True,
+    "select-snapshots": True,
+    "generate-harness": True,
+    "probe-env": True,
+    "validate-task-pack": True,
+}
+
 # Extra env vars passed to service/workload/CLI subprocesses.
 extra_env = {
     # "CUDA_VISIBLE_DEVICES": "0",
     # "PYTHONPATH": "/path/to/sglang/python",
 }
-

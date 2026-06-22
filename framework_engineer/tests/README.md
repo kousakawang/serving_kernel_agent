@@ -104,6 +104,23 @@ target_name = "sglang...TritonGDNKernel.extend"
 
 - `kernel_agent/framework_engineer/tests/real_sglang_phase1_config.example.py`
 
+可以用 `cli_tests` 字典控制每个 CLI 是否执行。key 是 CLI subcommand 名，value 是 bool；没写到字典里的 CLI 默认执行：
+
+```python
+cli_tests = {
+    "scaffold-task-pack": True,
+    "run-baseline": False,
+    "probe-target-calls": True,
+    "capture-snapshots": True,
+    "select-snapshots": True,
+    "generate-harness": True,
+    "probe-env": False,
+    "validate-task-pack": True,
+}
+```
+
+跳过有前后依赖的步骤时，测试不会自动补齐依赖。例如跳过 `capture-snapshots` 但保留 `select-snapshots`，需要你确保 task pack 里已经有可用的 raw snapshots。
+
 测试流程：
 
 1. `scaffold-task-pack`

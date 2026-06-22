@@ -15,6 +15,17 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+CLI_STEPS = (
+    "scaffold-task-pack",
+    "run-baseline",
+    "probe-target-calls",
+    "capture-snapshots",
+    "select-snapshots",
+    "generate-harness",
+    "probe-env",
+    "validate-task-pack",
+)
+
 
 @dataclass
 class RealSGLangConfig:
@@ -52,7 +63,13 @@ class RealSGLangConfig:
     validate_warmup: int = 3
     validate_repeat: int = 5
 
+    cli_tests: dict[str, bool] = field(default_factory=dict)
     extra_env: dict[str, str] = field(default_factory=dict)
+
+    def should_run_cli(self, name: str) -> bool:
+        if name not in CLI_STEPS:
+            raise KeyError(f"Unknown CLI step: {name}")
+        return bool(self.cli_tests.get(name, True))
 
 
 def _load_config() -> RealSGLangConfig:
@@ -106,16 +123,17 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
 
         print(f"[ka-real] task_pack={task_pack}")
         try:
-            self._run_cli(
-                "scaffold-task-pack",
-                "--task-id",
-                cfg.task_id,
-                "--out",
-                str(task_pack),
-                "--force",
-            )
+            if cfg.should_run_cli("scaffold-task-pack"):
+                self._run_cli(
+                    "scaffold-task-pack",
+                    "--task-id",
+                    cfg.task_id,
+                    "--out",
+                    str(task_pack),
+                    "--force",
+                )
 
-            if not cfg.skip_baseline:
+            if cfg.should_run_cli("run-baseline") and not cfg.skip_baseline:
                 self._run_cli(
                     "run-baseline",
                     "--task-pack",
@@ -127,92 +145,102 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                     *self._service_args(),
                 )
 
-            probe = self._run_cli(
-                "probe-target-calls",
-                "--task-pack",
-                str(task_pack),
-                "--service-cmd",
-                self._non_cudagraph_service_cmd(cfg.service_cmd),
-                "--workload-cmd",
-                cfg.workload_cmd,
-                "--target-file",
-                cfg.target_file,
-                "--function-name",
-                cfg.function_name,
-                "--target-name",
-                cfg.target_name,
-                *self._drop_first_arg(),
-                *self._service_args(),
-            )
-            self.assertGreater(probe["call_count"], 0, probe)
+            if cfg.should_run_cli("probe-target-calls"):
+                probe = self._run_cli(
+                    "probe-target-calls",
+                    "--task-pack",
+                    str(task_pack),
+                    "--service-cmd",
+                    self._non_cudagraph_service_cmd(cfg.service_cmd),
+                    "--workload-cmd",
+                    cfg.workload_cmd,
+                    "--target-file",
+                    cfg.target_file,
+                    "--function-name",
+                    cfg.function_name,
+                    "--target-name",
+                    cfg.target_name,
+                    *self._drop_first_arg(),
+                    *self._service_args(),
+                )
+                self.assertGreater(probe["call_count"], 0, probe)
 
-            capture = self._run_cli(
-                "capture-snapshots",
-                "--task-pack",
-                str(task_pack),
-                "--service-cmd",
-                self._non_cudagraph_service_cmd(cfg.service_cmd),
-                "--workload-cmd",
-                cfg.workload_cmd,
-                "--target-file",
-                cfg.target_file,
-                "--function-name",
-                cfg.function_name,
-                "--target-name",
-                cfg.target_name,
-                "--signature",
-                cfg.signature,
-                "--mode",
-                cfg.target_mode,
-                "--backend",
-                cfg.target_backend,
-                "--layer-id",
-                cfg.target_layer_id,
-                "--max-raw-cases",
-                str(cfg.max_raw_cases),
-                *self._mutable_arg_args(),
-                *self._drop_first_arg(),
-                *self._service_args(),
-            )
-            self.assertGreater(capture["raw_snapshot_count"], 0, capture)
+            if cfg.should_run_cli("capture-snapshots"):
+                capture = self._run_cli(
+                    "capture-snapshots",
+                    "--task-pack",
+                    str(task_pack),
+                    "--service-cmd",
+                    self._non_cudagraph_service_cmd(cfg.service_cmd),
+                    "--workload-cmd",
+                    cfg.workload_cmd,
+                    "--target-file",
+                    cfg.target_file,
+                    "--function-name",
+                    cfg.function_name,
+                    "--target-name",
+                    cfg.target_name,
+                    "--signature",
+                    cfg.signature,
+                    "--mode",
+                    cfg.target_mode,
+                    "--backend",
+                    cfg.target_backend,
+                    "--layer-id",
+                    cfg.target_layer_id,
+                    "--max-raw-cases",
+                    str(cfg.max_raw_cases),
+                    *self._mutable_arg_args(),
+                    *self._drop_first_arg(),
+                    *self._service_args(),
+                )
+                self.assertGreater(capture["raw_snapshot_count"], 0, capture)
 
-            selected = self._run_cli(
-                "select-snapshots",
-                "--task-pack",
-                str(task_pack),
-                *self._max_cases_args(),
-            )
-            self.assertGreater(selected["selected_case_count"], 0, selected)
+            if cfg.should_run_cli("select-snapshots"):
+                selected = self._run_cli(
+                    "select-snapshots",
+                    "--task-pack",
+                    str(task_pack),
+                    *self._max_cases_args(),
+                )
+                self.assertGreater(selected["selected_case_count"], 0, selected)
 
-            self._run_cli("generate-harness", "--task-pack", str(task_pack))
+            if cfg.should_run_cli("generate-harness"):
+                self._run_cli("generate-harness", "--task-pack", str(task_pack))
 
-            if cfg.run_probe_env:
+            ran_probe_env = False
+            if cfg.should_run_cli("probe-env") and cfg.run_probe_env:
                 self._run_cli("probe-env", "--task-pack", str(task_pack))
+                ran_probe_env = True
 
-            validate_args = [
-                "validate-task-pack",
-                "--task-pack",
-                str(task_pack),
-                "--run-correctness",
-            ]
-            if cfg.run_benchmark:
-                validate_args.append("--run-benchmark")
-            if not cfg.run_probe_env or cfg.skip_env_check:
-                validate_args.append("--skip-env-check")
+            if cfg.should_run_cli("validate-task-pack"):
+                validate_args = [
+                    "validate-task-pack",
+                    "--task-pack",
+                    str(task_pack),
+                    "--run-correctness",
+                ]
+                if cfg.run_benchmark:
+                    validate_args.append("--run-benchmark")
+                if not ran_probe_env or cfg.skip_env_check:
+                    validate_args.append("--skip-env-check")
 
-            validate = self._run_cli(
-                *validate_args,
-                extra_env={
-                    "DEVICE": cfg.validate_device,
-                    "WARMUP": str(cfg.validate_warmup),
-                    "REPEAT": str(cfg.validate_repeat),
-                    "PYTHON": sys.executable,
-                },
-            )
-            self.assertTrue(validate["valid"], validate)
+                validate = self._run_cli(
+                    *validate_args,
+                    extra_env={
+                        "DEVICE": cfg.validate_device,
+                        "WARMUP": str(cfg.validate_warmup),
+                        "REPEAT": str(cfg.validate_repeat),
+                        "PYTHON": sys.executable,
+                    },
+                )
+                self.assertTrue(validate["valid"], validate)
 
-            manifest = json.loads((task_pack / "snapshots" / "manifest.json").read_text(encoding="utf-8"))
-            self.assertGreater(manifest["selected_case_count"], 0)
+            manifest_path = task_pack / "snapshots" / "manifest.json"
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if cfg.should_run_cli("select-snapshots"):
+                    self.assertGreater(manifest["selected_case_count"], 0)
         finally:
             if tmpdir and not cfg.keep_task_pack:
                 shutil.rmtree(tmpdir, ignore_errors=True)
@@ -281,4 +309,3 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
