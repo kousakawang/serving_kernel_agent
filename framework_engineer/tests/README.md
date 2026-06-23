@@ -23,6 +23,9 @@ python3 -m unittest \
 - 跑 `generate-harness`。
 - 跑 `validate-task-pack --skip-env-check --run-correctness --run-benchmark`。
 
+本地如果没有 PyTorch，也可以运行这组测试；toy workload 使用纯 Python
+输入来验证 CLI、group/sample snapshot、selector 和 generic harness。
+
 ## 2. GPU smoke 测试
 
 如果服务器有 CUDA，可以运行：
@@ -44,8 +47,9 @@ python3 -m unittest kernel_agent.framework_engineer.tests.test_snapshot
 
 - tensor meta 记录 dtype/shape/stride/storage_offset/contiguous。
 - tree serializer 支持 tensor/primitive/list/tuple/dict/None。
-- `query_start_loc` diff 不同会产生不同 `semantic_hash`。
-- selected snapshot 生成 harness 后 correctness 初始可通过。
+- forward boundary 能给 target call 标记 `forward_id`。
+- 同一 group 的 hit count 和 sample 上限统计正确。
+- selected group/sample 生成 harness 后 correctness 初始可通过。
 
 ## 4. 真实 SGLang 接入前建议
 
@@ -100,6 +104,14 @@ function_name = "extend"
 target_name = "sglang...TritonGDNKernel.extend"
 ```
 
+可选但推荐配置 forward boundary，让 capture 能区分模型 forward window：
+
+```python
+forward_boundary_file = "/path/to/backend_or_model.py"
+forward_boundary_function = "forward_extend"
+forward_boundary_name = "sglang...GDNAttnBackend.forward_extend"
+```
+
 完整模板见：
 
 - `kernel_agent/framework_engineer/tests/real_sglang_phase1_config.example.py`
@@ -142,4 +154,12 @@ skip_baseline = True
 
 ```python
 non_cudagraph_service_cmd = "python -m sglang.launch_server ... --disable-cuda-graph"
+```
+
+FLA chunk 这类 free function 一般需要：
+
+```python
+drop_first_arg = False
+signature = "candidate(*args, **kwargs)"
+mutable_arg_paths = []
 ```

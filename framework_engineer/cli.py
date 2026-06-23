@@ -8,6 +8,7 @@ Run as:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -55,22 +56,28 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("capture-snapshots")
     _add_run_and_instrument_args(p)
-    p.add_argument("--signature", default="candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)")
+    p.add_argument("--signature", default="candidate(*args, **kwargs)")
     p.add_argument("--mutable-arg-path", action="append", default=[])
     p.add_argument("--mode", default="")
     p.add_argument("--backend", default="")
     p.add_argument("--layer-id", default="")
-    p.add_argument("--max-raw-cases", type=int, default=32)
+    p.add_argument("--calls-per-forward", type=int, default=None)
+    p.add_argument("--max-capture-groups", type=int, default=64)
+    p.add_argument("--max-samples-per-group", type=int, default=8)
+    p.add_argument("--max-samples-per-forward-per-group", type=int, default=3)
+    p.add_argument("--max-raw-cases", type=int, default=None, help="Deprecated alias for --max-capture-groups.")
     p.set_defaults(func=cmd_capture_snapshots)
 
     p = sub.add_parser("select-snapshots")
     p.add_argument("--task-pack", type=Path, required=True)
-    p.add_argument("--max-cases", type=int, default=None)
+    p.add_argument("--max-groups", type=int, default=None)
+    p.add_argument("--max-selected-samples-per-group", type=int, default=8)
+    p.add_argument("--max-cases", type=int, default=None, help="Deprecated alias for --max-groups.")
     p.set_defaults(func=cmd_select_snapshots)
 
     p = sub.add_parser("generate-harness")
     p.add_argument("--task-pack", type=Path, required=True)
-    p.add_argument("--candidate-function", default="candidate_extend")
+    p.add_argument("--candidate-function", default="candidate")
     p.set_defaults(func=cmd_generate_harness)
 
     p = sub.add_parser("probe-env")
@@ -92,11 +99,15 @@ def main(argv: list[str] | None = None) -> int:
 def _add_run_and_instrument_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task-pack", type=Path, required=True)
     parser.add_argument("--service-cmd", required=True)
+    parser.add_argument("--non-cudagraph-service-cmd", default=None)
     parser.add_argument("--workload-cmd", required=True)
     parser.add_argument("--target-file", type=Path, required=True)
     parser.add_argument("--function-name", required=True)
     parser.add_argument("--target-name", required=True)
     parser.add_argument("--drop-first-arg", action="store_true")
+    parser.add_argument("--forward-boundary-file", type=Path, default=None)
+    parser.add_argument("--forward-boundary-function", default=None)
+    parser.add_argument("--forward-boundary-name", default=None)
     parser.add_argument("--health-url", default=None)
     parser.add_argument("--startup-timeout", type=int, default=120)
     parser.add_argument("--workload-timeout", type=int, default=600)
@@ -118,9 +129,11 @@ def cmd_scaffold_task_pack(args: argparse.Namespace) -> int:
             {
                 "schema_version": "phase1.snapshot.v1",
                 "selection_policy": "not_selected_yet",
-                "raw_case_count": 0,
-                "selected_case_count": 0,
-                "cases": [],
+                "raw_group_count": 0,
+                "raw_sample_count": 0,
+                "selected_group_count": 0,
+                "selected_sample_count": 0,
+                "case_groups": [],
             },
             indent=2,
             sort_keys=True,
@@ -132,8 +145,24 @@ def cmd_scaffold_task_pack(args: argparse.Namespace) -> int:
             {
                 "schema_version": "phase1.shape_summary.v1",
                 "source": "snapshots/manifest.json",
-                "note": "Selected snapshots are the replay source; this file is only an index/summary.",
+                "note": "Selected snapshot samples are the replay source; this file is only a group index/summary.",
+                "shape_groups": [],
                 "shape_cases": [],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (out / "snapshots" / "raw_index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "phase1.snapshot.v1",
+                "index_type": "raw_group_index",
+                "raw_group_count": 0,
+                "raw_sample_count": 0,
+                "total_hit_count": 0,
+                "groups": {},
             },
             indent=2,
             sort_keys=True,
@@ -169,11 +198,12 @@ def cmd_probe_target_calls(args: argparse.Namespace) -> int:
     decorator_expr = (
         "__import__('kernel_agent.framework_engineer.snapshot.recorder', "
         "fromlist=['make_probe_decorator']).make_probe_decorator("
-        f"{str(log_path)!r}, {args.target_name!r})"
+        f"{str(log_path)!r}, {args.target_name!r}, drop_first_arg={bool(args.drop_first_arg)!r})"
     )
-    with _temporary_decorator(args.target_file, args.function_name, decorator_expr):
+    service_cmd = _resolve_non_cudagraph_service_cmd(args.service_cmd, args.non_cudagraph_service_cmd)
+    with _instrumentation_context(args, decorator_expr):
         result = _run_service_and_workload(
-            service_cmd=args.service_cmd,
+            service_cmd=service_cmd,
             workload_cmd=args.workload_cmd,
             health_url=args.health_url,
             startup_timeout=args.startup_timeout,
@@ -185,6 +215,8 @@ def cmd_probe_target_calls(args: argparse.Namespace) -> int:
         "call_count": len(calls),
         "workload_returncode": result["workload"]["returncode"],
         "log_path": str(log_path),
+        "service_cmd": service_cmd,
+        "workload_cmd": args.workload_cmd,
     }
     _write_json(docs / "target_call_probe_report.json", report)
     (docs / "target_call_probe_report.md").write_text(
@@ -198,50 +230,80 @@ def cmd_probe_target_calls(args: argparse.Namespace) -> int:
 def cmd_capture_snapshots(args: argparse.Namespace) -> int:
     snapshot_root = args.task_pack / "snapshots"
     mutable_paths = ",".join(args.mutable_arg_path)
+    max_capture_groups = args.max_raw_cases if args.max_raw_cases is not None else args.max_capture_groups
     decorator_expr = (
         "__import__('kernel_agent.framework_engineer.snapshot.recorder', "
         "fromlist=['make_snapshot_decorator']).make_snapshot_decorator("
         f"{str(snapshot_root)!r}, {args.task_pack.name!r}, {args.target_name!r}, {args.signature!r}, "
         f"mutable_arg_paths={mutable_paths!r}, mode={args.mode!r}, backend={args.backend!r}, "
         f"layer_id={args.layer_id!r}, drop_first_arg={bool(args.drop_first_arg)!r}, "
-        f"max_raw_cases={args.max_raw_cases!r})"
+        f"calls_per_forward={args.calls_per_forward!r}, max_capture_groups={max_capture_groups!r}, "
+        f"max_samples_per_group={args.max_samples_per_group!r}, "
+        f"max_samples_per_forward_per_group={args.max_samples_per_forward_per_group!r})"
     )
-    with _temporary_decorator(args.target_file, args.function_name, decorator_expr):
+    service_cmd = _resolve_non_cudagraph_service_cmd(args.service_cmd, args.non_cudagraph_service_cmd)
+    with _instrumentation_context(args, decorator_expr):
         result = _run_service_and_workload(
-            service_cmd=args.service_cmd,
+            service_cmd=service_cmd,
             workload_cmd=args.workload_cmd,
             health_url=args.health_url,
             startup_timeout=args.startup_timeout,
             workload_timeout=args.workload_timeout,
         )
-    raw_count = len(SnapshotStore(snapshot_root).list_raw_cases())
+    raw_index = SnapshotStore(snapshot_root).read_raw_index()
     report = {
         "target_name": args.target_name,
-        "raw_snapshot_count": raw_count,
+        "windowing_mode": _windowing_mode(args),
+        "raw_group_count": raw_index.get("raw_group_count", 0),
+        "raw_sample_count": raw_index.get("raw_sample_count", 0),
+        "raw_snapshot_count": raw_index.get("raw_sample_count", 0),
+        "total_hit_count": raw_index.get("total_hit_count", 0),
+        "dropped_hit_count": raw_index.get("dropped_hit_count", 0),
         "workload_returncode": result["workload"]["returncode"],
+        "service_cmd": service_cmd,
+        "workload_cmd": args.workload_cmd,
+        "max_raw_cases_deprecated_alias_used": args.max_raw_cases is not None,
+        "workload_stdout_tail": result["workload"].get("stdout", "")[-2000:],
+        "workload_stderr_tail": result["workload"].get("stderr", "")[-2000:],
     }
     docs = args.task_pack / "docs"
     docs.mkdir(parents=True, exist_ok=True)
     _write_json(docs / "snapshot_capture_report.json", report)
     print(json.dumps(report, sort_keys=True))
-    return 0 if result["workload"]["returncode"] == 0 and raw_count else 1
+    return 0 if result["workload"]["returncode"] == 0 and raw_index.get("raw_sample_count", 0) else 1
 
 
 def cmd_select_snapshots(args: argparse.Namespace) -> int:
     store = SnapshotStore(args.task_pack / "snapshots")
-    manifest = SnapshotSelector(store).select(max_cases=args.max_cases)
+    max_groups = args.max_groups if args.max_groups is not None else args.max_cases
+    manifest = SnapshotSelector(store).select(
+        max_groups=max_groups,
+        max_samples_per_group=args.max_selected_samples_per_group,
+    )
     write_shape_list_summary(args.task_pack, manifest)
     docs = args.task_pack / "docs"
     docs.mkdir(parents=True, exist_ok=True)
     _write_json(docs / "snapshot_selection_report.json", manifest)
     (docs / "snapshot_selection_report.md").write_text(
         "# Snapshot Selection Report\n\n"
-        f"- raw_case_count: {manifest['raw_case_count']}\n"
-        f"- selected_case_count: {manifest['selected_case_count']}\n"
+        f"- raw_group_count: {manifest['raw_group_count']}\n"
+        f"- raw_sample_count: {manifest['raw_sample_count']}\n"
+        f"- selected_group_count: {manifest['selected_group_count']}\n"
+        f"- selected_sample_count: {manifest['selected_sample_count']}\n"
         f"- policy: `{manifest['selection_policy']}`\n",
         encoding="utf-8",
     )
-    print(json.dumps({"selected_case_count": manifest["selected_case_count"], "manifest": str(store.manifest_path)}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "selected_group_count": manifest["selected_group_count"],
+                "selected_sample_count": manifest["selected_sample_count"],
+                "selected_case_count": manifest["selected_group_count"],
+                "manifest": str(store.manifest_path),
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -441,6 +503,52 @@ def _subprocess_env() -> dict[str, str]:
         parts.append(current)
     env["PYTHONPATH"] = os.pathsep.join(parts)
     return env
+
+
+def _instrumentation_context(args: argparse.Namespace, target_decorator_expr: str):
+    stack = contextlib.ExitStack()
+    if args.forward_boundary_file and args.forward_boundary_function:
+        boundary_name = args.forward_boundary_name or args.forward_boundary_function
+        boundary_expr = (
+            "__import__('kernel_agent.framework_engineer.snapshot.recorder', "
+            "fromlist=['make_forward_boundary_decorator']).make_forward_boundary_decorator("
+            f"{boundary_name!r})"
+        )
+        stack.enter_context(_temporary_decorator(args.forward_boundary_file, args.forward_boundary_function, boundary_expr))
+    stack.enter_context(_temporary_decorator(args.target_file, args.function_name, target_decorator_expr))
+    return stack
+
+
+def _resolve_non_cudagraph_service_cmd(service_cmd: str, explicit_cmd: str | None) -> str:
+    if explicit_cmd:
+        return _dedupe_disable_cuda_graph(explicit_cmd)
+    cmd = _dedupe_disable_cuda_graph(service_cmd)
+    if "--disable-cuda-graph" not in cmd.split():
+        cmd = cmd.rstrip() + " --disable-cuda-graph"
+    return cmd
+
+
+def _dedupe_disable_cuda_graph(cmd: str) -> str:
+    parts = cmd.split()
+    seen = False
+    changed = False
+    out = []
+    for part in parts:
+        if part == "--disable-cuda-graph":
+            if seen:
+                changed = True
+                continue
+            seen = True
+        out.append(part)
+    return " ".join(out) if changed else cmd
+
+
+def _windowing_mode(args: argparse.Namespace) -> str:
+    if args.forward_boundary_file and args.forward_boundary_function:
+        return "forward_boundary"
+    if getattr(args, "calls_per_forward", None):
+        return "calls_per_forward"
+    return "unknown_forward"
 
 
 class _temporary_decorator:

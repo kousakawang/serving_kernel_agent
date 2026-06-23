@@ -80,3 +80,48 @@ class SnapshotCase:
             tolerance=dict(data.get("tolerance", {})),
         )
 
+
+@dataclass
+class SnapshotSample:
+    task_id: str
+    group_id: str
+    sample_id: str
+    target: dict[str, Any]
+    interface: dict[str, Any]
+    files: dict[str, str]
+    mutation: dict[str, Any]
+    hashes: dict[str, str]
+    capture: dict[str, Any]
+    tolerance: dict[str, float]
+    schema_version: str = SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "task_id": self.task_id,
+            "group_id": self.group_id,
+            "sample_id": self.sample_id,
+            "target": self.target,
+            "interface": self.interface,
+            "files": self.files,
+            "mutation": self.mutation,
+            "hashes": self.hashes,
+            "capture": self.capture,
+            "tolerance": self.tolerance,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SnapshotSample":
+        return cls(
+            schema_version=data.get("schema_version", SCHEMA_VERSION),
+            task_id=data["task_id"],
+            group_id=data["group_id"],
+            sample_id=data["sample_id"],
+            target=dict(data.get("target", {})),
+            interface=dict(data.get("interface", {})),
+            files=dict(data.get("files", {})),
+            mutation=dict(data.get("mutation", {})),
+            hashes=dict(data.get("hashes", {})),
+            capture=dict(data.get("capture", {})),
+            tolerance=dict(data.get("tolerance", {})),
+        )

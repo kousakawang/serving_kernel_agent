@@ -32,9 +32,11 @@ BailingMoELinearAttention.forward
 ## Selected ABI
 
 ```python
-def candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc):
+def candidate(*args, **kwargs):
     ...
 ```
+
+The concrete args/kwargs tree is defined by selected snapshot samples.
 
 ## Framework-Owned Inputs
 

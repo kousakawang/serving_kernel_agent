@@ -23,6 +23,12 @@ target_file = "/path/to/sglang/python/sglang/srt/layers/attention/linear/kernels
 function_name = "extend"
 target_name = "sglang.srt.layers.attention.linear.kernels.gdn_triton.TritonGDNKernel.extend"
 
+# Optional but recommended: a higher-level forward/module/backend function that
+# wraps repeated target kernel calls for one model forward window.
+forward_boundary_file = None
+forward_boundary_function = None
+forward_boundary_name = None
+
 # Optional task output.
 task_id = "qwen35_gdn_extend_core_h20_real"
 task_pack = "/tmp/qwen35_gdn_extend_task_pack"
@@ -36,11 +42,12 @@ workload_timeout = 1200
 test_timeout = 3600
 
 # If appending --disable-cuda-graph to service_cmd is wrong for your setup,
-# provide the exact non-cudagraph launch command here.
+# provide the exact non-cudagraph launch command here. The CLI will also dedupe
+# duplicate --disable-cuda-graph flags.
 non_cudagraph_service_cmd = service_cmd + " --disable-cuda-graph"
 
 # Target ABI/capture controls.
-signature = "candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)"
+signature = "candidate(*args, **kwargs)"
 target_mode = "extend"
 target_backend = "triton"
 target_layer_id = ""
@@ -52,8 +59,25 @@ drop_first_arg = True
 # mutable_arg_paths = ["kwargs.ssm_states", "kwargs.conv_states"]
 mutable_arg_paths = ["kwargs.ssm_states"]
 
-max_raw_cases = 32
-max_selected_cases = 8
+# FLA chunk free functions usually use:
+#
+# target_file = "/path/to/sglang/python/sglang/srt/layers/attention/fla/chunk_fwd.py"
+# function_name = "chunk_gated_delta_rule_fwd_intra"
+# target_name = "sglang.srt.layers.attention.fla.chunk_fwd.chunk_gated_delta_rule_fwd_intra"
+# drop_first_arg = False
+# mutable_arg_paths = []
+#
+# If no forward boundary is available yet, calls_per_forward can be used as a
+# fragile fallback after probe-target-calls confirms a stable call count.
+calls_per_forward = None
+max_capture_groups = 64
+max_samples_per_group = 8
+max_samples_per_forward_per_group = 3
+max_raw_cases = None  # Deprecated alias for max_capture_groups.
+max_selected_groups = 8
+max_selected_samples_per_group = 8
+max_selected_cases = None  # Deprecated alias for max_selected_groups.
+candidate_function = "candidate"
 
 # Validation controls.
 run_probe_env = False

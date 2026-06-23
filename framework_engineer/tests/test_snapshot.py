@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import tempfile
@@ -13,49 +12,41 @@ try:
 except Exception:  # pragma: no cover
     torch = None
 
-from kernel_agent.framework_engineer.snapshot.recorder import SnapshotRecorder
-from kernel_agent.framework_engineer.snapshot.selector import SnapshotSelector, write_shape_list_summary
 from kernel_agent.framework_engineer.snapshot.harness_builder import SnapshotHarnessBuilder
+from kernel_agent.framework_engineer.snapshot.recorder import SnapshotRecorder, make_forward_boundary_decorator
+from kernel_agent.framework_engineer.snapshot.selector import SnapshotSelector, write_shape_list_summary
 from kernel_agent.framework_engineer.snapshot.store import SnapshotStore
 from kernel_agent.framework_engineer.snapshot.tree import tree_meta
 
 
-@unittest.skipIf(torch is None, "torch is required for snapshot tests")
 class SnapshotTests(unittest.TestCase):
-    def _save_case(self, store: SnapshotStore, query_start_loc, *, task_id: str = "task_pack") -> None:
-        q = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-        k = q + 1
-        v = q + 2
-        g = q + 3
-        beta = q + 4
-        ssm_pre = torch.zeros(2, 2)
-        ssm_post = torch.ones(2, 2)
-        cache_indices = torch.tensor([0, 1], dtype=torch.int64)
-        pre = {
-            "args": (q, k, v, g, beta),
-            "kwargs": {
-                "ssm_states": ssm_pre,
-                "cache_indices": cache_indices,
-                "query_start_loc": torch.tensor(query_start_loc, dtype=torch.int64),
-            },
-        }
-        post = {
-            "args": (q, k, v, g, beta),
-            "kwargs": {
-                "ssm_states": ssm_post,
-                "cache_indices": cache_indices,
-                "query_start_loc": torch.tensor(query_start_loc, dtype=torch.int64),
-            },
-        }
+    def _capture_primitive_calls(self, store: SnapshotStore, *, task_id: str = "task_pack") -> None:
         recorder = SnapshotRecorder(
             store,
             task_id=task_id,
-            target={"qualified_name": "test.extend", "logical_name": "gdn_extend_core_v1", "mode": "extend", "backend": "test"},
-            signature="candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)",
-            mutable_arg_paths=["kwargs.ssm_states"],
+            target={"qualified_name": "toy.extend", "logical_name": "extend", "mode": "extend", "backend": "test"},
+            signature="candidate(*args, **kwargs)",
+            mutable_arg_paths=["kwargs.state.total"],
+            max_capture_groups=8,
+            max_samples_per_group=4,
+            max_samples_per_forward_per_group=2,
         )
-        recorder.save_call(pre, post, q + k)
 
+        @recorder.decorate
+        def target(*, values, state):
+            state["total"] += sum(values)
+            return {"out": [v + 1 for v in values]}
+
+        @make_forward_boundary_decorator("toy.forward")
+        def forward(values):
+            target(values=values, state={"total": 0})
+            target(values=values, state={"total": 0})
+            target(values=values, state={"total": 0})
+
+        forward([1, 2, 3])
+        forward([1, 2, 3])
+
+    @unittest.skipIf(torch is None, "torch is required for tensor metadata test")
     def test_tensor_meta_records_layout(self) -> None:
         tensor = torch.zeros(2, 3).t()
         meta = tree_meta({"x": tensor})["items"]["x"]["meta"]
@@ -64,23 +55,28 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse(meta["is_contiguous"])
         self.assertEqual(meta["storage_offset"], 0)
 
-    def test_semantic_hash_separates_query_start_patterns(self) -> None:
+    def test_group_hit_count_and_sample_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SnapshotStore(Path(tmp) / "snapshots")
-            self._save_case(store, [0, 2, 4])
-            self._save_case(store, [0, 1, 4])
-            cases = store.list_raw_cases()
-            self.assertEqual(len(cases), 2)
-            self.assertNotEqual(cases[0].hashes["semantic_hash"], cases[1].hashes["semantic_hash"])
+            self._capture_primitive_calls(store)
+            index = store.read_raw_index()
+            self.assertEqual(index["raw_group_count"], 1)
+            self.assertEqual(index["total_hit_count"], 6)
+            group = next(iter(index["groups"].values()))
+            self.assertEqual(group["total_hit_count"], 6)
+            self.assertEqual(group["forward_hit_count"], 2)
+            self.assertEqual(group["sample_count"], 4)
+            for count in group["samples_per_forward"].values():
+                self.assertLessEqual(count, 2)
 
-    def test_select_and_generated_harness_passes_on_cpu(self) -> None:
+    def test_select_and_generated_harness_passes_without_torch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             task_pack = Path(tmp) / "task_pack"
             (task_pack / "snapshots" / "raw").mkdir(parents=True)
             (task_pack / "snapshots" / "selected").mkdir(parents=True)
             store = SnapshotStore(task_pack / "snapshots")
-            self._save_case(store, [0, 2, 4], task_id=task_pack.name)
-            manifest = SnapshotSelector(store).select()
+            self._capture_primitive_calls(store, task_id=task_pack.name)
+            manifest = SnapshotSelector(store).select(max_groups=1, max_samples_per_group=4)
             write_shape_list_summary(task_pack, manifest)
             SnapshotHarnessBuilder(task_pack).generate()
             proc = subprocess.run(
@@ -97,4 +93,3 @@ class SnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

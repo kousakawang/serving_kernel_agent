@@ -14,12 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class Phase1CliEndToEndTests(unittest.TestCase):
-    """Exercise the real Framework Engineer CLI on a tiny target function.
-
-    This test intentionally uses subprocesses and temporary source rewriting so
-    it covers the same path used for SGLang target probing/capture, without
-    requiring a real SGLang or GPU environment.
-    """
+    """Exercise the Framework Engineer CLI on a tiny pure-Python target."""
 
     def test_cli_probe_capture_select_generate_validate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,13 +31,7 @@ class Phase1CliEndToEndTests(unittest.TestCase):
             service_cmd = f"{sys.executable} {service_file}"
             workload_cmd = f"{sys.executable} {workload_file}"
 
-            self._run_cli(
-                "scaffold-task-pack",
-                "--task-id",
-                "toy_gdn_extend",
-                "--out",
-                str(task_pack),
-            )
+            self._run_cli("scaffold-task-pack", "--task-id", "toy_extend", "--out", str(task_pack))
 
             baseline = self._run_cli(
                 "run-baseline",
@@ -56,7 +45,6 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 "1",
             )
             self.assertEqual(baseline["status"], "ok")
-            self.assertTrue((task_pack / "docs" / "baseline_run_report.md").exists())
 
             probe = self._run_cli(
                 "probe-target-calls",
@@ -72,17 +60,32 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 "extend",
                 "--target-name",
                 "toy_kernel.extend",
+                "--forward-boundary-file",
+                str(target_file),
+                "--forward-boundary-function",
+                "forward_window",
+                "--forward-boundary-name",
+                "toy_kernel.forward_window",
                 "--startup-timeout",
                 "1",
             )
-            self.assertEqual(probe["call_count"], 3)
+            self.assertEqual(probe["call_count"], 6)
+            probe_rows = [
+                json.loads(line)
+                for line in (task_pack / "docs" / "target_call_probe.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(probe_rows[0]["positional_arg_count"], 0)
+            self.assertEqual(probe_rows[0]["kwarg_count"], 2)
+            self.assertIsNotNone(probe_rows[0]["forward_id"])
+            self.assertIn("--disable-cuda-graph", probe["service_cmd"])
 
             capture = self._run_cli(
                 "capture-snapshots",
                 "--task-pack",
                 str(task_pack),
                 "--service-cmd",
-                service_cmd,
+                service_cmd + " --disable-cuda-graph --disable-cuda-graph",
                 "--workload-cmd",
                 workload_cmd,
                 "--target-file",
@@ -91,22 +94,44 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 "extend",
                 "--target-name",
                 "toy_kernel.extend",
+                "--signature",
+                "candidate(*args, **kwargs)",
                 "--mutable-arg-path",
-                "kwargs.ssm_states",
+                "kwargs.state.total",
+                "--forward-boundary-file",
+                str(target_file),
+                "--forward-boundary-function",
+                "forward_window",
+                "--forward-boundary-name",
+                "toy_kernel.forward_window",
+                "--max-capture-groups",
+                "8",
+                "--max-samples-per-group",
+                "4",
+                "--max-samples-per-forward-per-group",
+                "2",
                 "--startup-timeout",
                 "1",
             )
-            self.assertEqual(capture["raw_snapshot_count"], 3)
+            self.assertEqual(capture["raw_group_count"], 1)
+            self.assertEqual(capture["raw_sample_count"], 4)
+            self.assertEqual(capture["total_hit_count"], 6)
+            self.assertEqual(capture["service_cmd"].count("--disable-cuda-graph"), 1)
             self.assertNotIn("@__import__", target_file.read_text(encoding="utf-8"))
 
-            selected = self._run_cli("select-snapshots", "--task-pack", str(task_pack))
-            self.assertEqual(selected["selected_case_count"], 2)
-            self.assertTrue((task_pack / "snapshots" / "manifest.json").exists())
+            selected = self._run_cli(
+                "select-snapshots",
+                "--task-pack",
+                str(task_pack),
+                "--max-groups",
+                "1",
+                "--max-selected-samples-per-group",
+                "4",
+            )
+            self.assertEqual(selected["selected_group_count"], 1)
+            self.assertEqual(selected["selected_sample_count"], 4)
 
             self._run_cli("generate-harness", "--task-pack", str(task_pack))
-            self.assertTrue((task_pack / "snapshot_runtime.py").exists())
-            self.assertTrue((task_pack / "correctness_test.py").exists())
-            self.assertTrue((task_pack / "benchmark.py").exists())
 
             validate = self._run_cli(
                 "validate-task-pack",
@@ -116,7 +141,7 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 "--run-correctness",
                 "--run-benchmark",
                 extra_env={
-                    "DEVICE": os.environ.get("KA_TEST_DEVICE", "cpu"),
+                    "DEVICE": "cpu",
                     "WARMUP": "1",
                     "REPEAT": "2",
                     "PYTHON": sys.executable,
@@ -126,18 +151,16 @@ class Phase1CliEndToEndTests(unittest.TestCase):
             self.assertFalse(validate["errors"], validate)
 
             manifest = json.loads((task_pack / "snapshots" / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["raw_case_count"], 3)
-            self.assertEqual(manifest["selected_case_count"], 2)
+            self.assertEqual(manifest["selected_group_count"], 1)
+            self.assertEqual(manifest["selected_sample_count"], 4)
 
             shape_list = json.loads((task_pack / "shape_list.json").read_text(encoding="utf-8"))
             self.assertEqual(shape_list["source"], "snapshots/manifest.json")
-            self.assertEqual(len(shape_list["shape_cases"]), 2)
+            self.assertEqual(len(shape_list["shape_groups"]), 1)
 
     def _run_cli(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
         env = os.environ.copy()
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(PROJECT_ROOT), env.get("PYTHONPATH", "")]
-        ).rstrip(os.pathsep)
+        env["PYTHONPATH"] = os.pathsep.join([str(PROJECT_ROOT), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
         if extra_env:
             env.update(extra_env)
         proc = subprocess.run(
@@ -150,7 +173,7 @@ class Phase1CliEndToEndTests(unittest.TestCase):
             check=False,
             timeout=120,
         )
-        self.assertEqual(proc.returncode, 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
+        self.assertEqual(proc.returncode, 0, f"args={args}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
         lines = [line for line in proc.stdout.splitlines() if line.strip()]
         self.assertTrue(lines, "CLI produced no stdout")
         return json.loads(lines[-1])
@@ -160,14 +183,15 @@ class Phase1CliEndToEndTests(unittest.TestCase):
         path.write_text(
             textwrap.dedent(
                 """
-                import torch
+                def extend(*, values, state):
+                    state["total"] += sum(values)
+                    return {"out": [v + 1 for v in values], "total": state["total"]}
 
 
-                def extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc):
-                    # Mutate state to exercise pre/post snapshot correctness.
-                    update = q.sum(dim=-1, keepdim=True).to(ssm_states.dtype)
-                    ssm_states.copy_(ssm_states + update)
-                    return q + k + v + g * beta
+                def forward_window(values):
+                    extend(values=values, state={"total": 0})
+                    extend(values=values, state={"total": 0})
+                    extend(values=values, state={"total": 0})
                 """
             ),
             encoding="utf-8",
@@ -178,43 +202,14 @@ class Phase1CliEndToEndTests(unittest.TestCase):
         path.write_text(
             textwrap.dedent(
                 f"""
-                import os
                 import sys
-                from pathlib import Path
 
                 sys.path.insert(0, {str(module_dir)!r})
 
-                import torch
                 import toy_kernel
 
-
-                device = os.environ.get("KA_TEST_DEVICE", "cpu")
-                if device == "cuda" and not torch.cuda.is_available():
-                    raise RuntimeError("KA_TEST_DEVICE=cuda but torch.cuda.is_available() is false")
-
-
-                def run_case(query_start_loc):
-                    q = torch.arange(6, dtype=torch.float32, device=device).reshape(3, 2)
-                    k = q + 1
-                    v = q + 2
-                    g = torch.full_like(q, 0.5)
-                    beta = torch.full_like(q, 2.0)
-                    ssm_states = torch.zeros(3, 1, dtype=torch.float32, device=device)
-                    cache_indices = torch.arange(3, dtype=torch.int64, device=device)
-                    query_start_loc = torch.tensor(query_start_loc, dtype=torch.int64, device=device)
-                    out = toy_kernel.extend(
-                        q, k, v, g, beta,
-                        ssm_states=ssm_states,
-                        cache_indices=cache_indices,
-                        query_start_loc=query_start_loc,
-                    )
-                    torch.cuda.synchronize() if device == "cuda" else None
-                    print(float(out.sum().detach().cpu()), float(ssm_states.sum().detach().cpu()))
-
-
-                run_case([0, 1, 3, 3])
-                run_case([0, 1, 3, 3])
-                run_case([0, 2, 3, 3])
+                toy_kernel.forward_window([1, 2, 3])
+                toy_kernel.forward_window([1, 2, 3])
                 """
             ),
             encoding="utf-8",
@@ -223,4 +218,3 @@ class Phase1CliEndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

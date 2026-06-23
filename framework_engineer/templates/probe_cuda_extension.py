@@ -4,6 +4,17 @@ import torch
 from torch.utils.cpp_extension import load_inline
 
 
+CPP_SRC = r"""
+#include <torch/extension.h>
+
+torch::Tensor add_one(torch::Tensor x);
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("add_one", &add_one, "add_one");
+}
+"""
+
+
 CUDA_SRC = r"""
 #include <torch/extension.h>
 
@@ -25,9 +36,8 @@ def main() -> None:
     assert torch.cuda.is_available(), "CUDA is not available"
     mod = load_inline(
         name="kernel_agent_probe_cuda_extension",
-        cpp_sources="",
+        cpp_sources=CPP_SRC,
         cuda_sources=CUDA_SRC,
-        functions=["add_one"],
         with_cuda=True,
         verbose=False,
     )

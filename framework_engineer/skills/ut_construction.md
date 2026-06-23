@@ -5,14 +5,15 @@ Snapshot harness 用来把真实框架接口调用变成可独立验证的 kerne
 ## 输入
 
 - `snapshots/manifest.json`
-- `snapshots/selected/*/meta.json`
-- `snapshots/selected/*/pre_inputs.pt`
-- `snapshots/selected/*/post_inputs.pt`
-- `snapshots/selected/*/outputs.pt`
-- 目标候选接口签名，例如：
+- `snapshots/selected/<group_id>/group_meta.json`
+- `snapshots/selected/<group_id>/samples/<sample_id>/meta.json`
+- `snapshots/selected/<group_id>/samples/<sample_id>/pre_inputs.pt`
+- `snapshots/selected/<group_id>/samples/<sample_id>/post_inputs.pt`
+- `snapshots/selected/<group_id>/samples/<sample_id>/outputs.pt`
+- 目标候选接口签名默认为：
 
 ```python
-candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)
+candidate(*args, **kwargs)
 ```
 
 ## Correctness 规则
@@ -32,7 +33,7 @@ candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc
 - 每轮 timed run 前恢复 mutable inputs 到 pre-state。
 - reset/clone/copy 不计入 timed region。
 - CUDA event timing 优先；CPU timer 只作为 fallback。
-- 输出 JSONL，包含 case_id、target、warmup、repeat、median_us、mean_us、min_us、max_us。
+- 输出 JSONL，包含 group_id、sample_id、target、warmup、repeat、median_us、mean_us、min_us、max_us，并输出 group summary。
 
 ## Candidate 初始状态
 
@@ -44,7 +45,7 @@ candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc
 - `shape_list.json`
 - `snapshot_runtime.py`
 - `snapshots/manifest.json`
-- `snapshots/selected/*`
+- `snapshots/selected/<group_id>/samples/<sample_id>`
 - `reference_impl.py`
 - `candidate_impl.py`
 - `correctness_test.py`
@@ -53,4 +54,3 @@ candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc
 - `scripts/run_benchmark.sh`
 - `scripts/run_ncu.sh`
 - `env_manifest.yaml`
-

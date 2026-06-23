@@ -32,10 +32,37 @@ def shape_hash(target: dict[str, Any], input_meta: dict[str, Any]) -> str:
         )
     payload = {
         "logical_name": target.get("logical_name") or target.get("qualified_name"),
+        "qualified_name": target.get("qualified_name"),
+        "mode": target.get("mode"),
+        "backend": target.get("backend"),
+        "layer_id": target.get("layer_id"),
         "tree": _shape_tree(input_meta),
         "tensors": tensors,
     }
     return short_hash(payload, 24)
+
+
+def group_key(target: dict[str, Any], input_meta: dict[str, Any]) -> str:
+    """Return the Phase 1 grouping key.
+
+    This intentionally excludes tensor values. Tensor leaves contribute dtype,
+    shape, stride/layout, storage offset, and contiguity through shape_hash.
+    Primitive values and None/presence are preserved by _shape_tree.
+    """
+    return short_hash(
+        {
+            "schema": "phase1.forward_windowed_shape_group.v1",
+            "shape_hash": shape_hash(target, input_meta),
+            "target": {
+                "qualified_name": target.get("qualified_name"),
+                "logical_name": target.get("logical_name"),
+                "mode": target.get("mode"),
+                "backend": target.get("backend"),
+                "layer_id": target.get("layer_id"),
+            },
+        },
+        24,
+    )
 
 
 def _shape_tree(meta: dict[str, Any]) -> Any:
@@ -168,4 +195,3 @@ def _index_feature(value: Any) -> dict[str, Any]:
         "unique_count": int(tensor.unique().numel()),
         "preview": tensor[:32].tolist(),
     }
-

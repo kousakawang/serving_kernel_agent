@@ -33,13 +33,17 @@ def validate_files(task_pack: Path) -> list[str]:
     manifest = task_pack / "snapshots" / "manifest.json"
     if manifest.exists():
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        if not data.get("cases"):
-            errors.append("snapshots/manifest.json has no selected cases")
-        for case in data.get("cases", []):
-            case_dir = task_pack / "snapshots" / "selected" / case["case_id"]
-            for rel in ("meta.json", "pre_inputs.pt", "post_inputs.pt", "outputs.pt"):
-                if not (case_dir / rel).exists():
-                    errors.append(f"missing snapshot file for {case['case_id']}: {rel}")
+        if not data.get("case_groups"):
+            errors.append("snapshots/manifest.json has no selected case_groups")
+        for group in data.get("case_groups", []):
+            group_dir = task_pack / "snapshots" / "selected" / group["group_id"]
+            if not (group_dir / "group_meta.json").exists():
+                errors.append(f"missing group_meta.json for {group['group_id']}")
+            for sample in group.get("samples", []):
+                sample_dir = group_dir / "samples" / sample["sample_id"]
+                for rel in ("meta.json", "pre_inputs.pt", "post_inputs.pt", "outputs.pt"):
+                    if not (sample_dir / rel).exists():
+                        errors.append(f"missing snapshot file for {group['group_id']}/{sample['sample_id']}: {rel}")
     return errors
 
 
@@ -69,4 +73,3 @@ def run_smoke(task_pack: Path, *, correctness: bool, benchmark: bool, timeout: i
             }
         )
     return results
-

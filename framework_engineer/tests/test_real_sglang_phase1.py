@@ -34,6 +34,9 @@ class RealSGLangConfig:
     target_file: str
     function_name: str
     target_name: str
+    forward_boundary_file: str | None = None
+    forward_boundary_function: str | None = None
+    forward_boundary_name: str | None = None
 
     task_id: str = "real_sglang_phase1"
     task_pack: str | None = None
@@ -46,15 +49,22 @@ class RealSGLangConfig:
     workload_timeout: int = 1200
     test_timeout: int = 3600
 
-    signature: str = "candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)"
+    signature: str = "candidate(*args, **kwargs)"
     target_mode: str = ""
     target_backend: str = ""
     target_layer_id: str = ""
-    drop_first_arg: bool = True
-    mutable_arg_paths: list[str] = field(default_factory=lambda: ["kwargs.ssm_states"])
+    drop_first_arg: bool = False
+    mutable_arg_paths: list[str] = field(default_factory=list)
 
-    max_raw_cases: int = 32
-    max_selected_cases: int | None = 8
+    calls_per_forward: int | None = None
+    max_capture_groups: int = 64
+    max_samples_per_group: int = 8
+    max_samples_per_forward_per_group: int = 3
+    max_raw_cases: int | None = None
+    max_selected_groups: int | None = 8
+    max_selected_samples_per_group: int = 8
+    max_selected_cases: int | None = None
+    candidate_function: str = "candidate"
 
     run_probe_env: bool = False
     skip_env_check: bool = True
@@ -161,6 +171,7 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                     "--target-name",
                     cfg.target_name,
                     *self._drop_first_arg(),
+                    *self._forward_boundary_args(),
                     *self._service_args(),
                 )
                 self.assertGreater(probe["call_count"], 0, probe)
@@ -188,25 +199,39 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                     cfg.target_backend,
                     "--layer-id",
                     cfg.target_layer_id,
-                    "--max-raw-cases",
-                    str(cfg.max_raw_cases),
+                    "--max-capture-groups",
+                    str(cfg.max_capture_groups),
+                    "--max-samples-per-group",
+                    str(cfg.max_samples_per_group),
+                    "--max-samples-per-forward-per-group",
+                    str(cfg.max_samples_per_forward_per_group),
+                    *self._calls_per_forward_args(),
                     *self._mutable_arg_args(),
                     *self._drop_first_arg(),
+                    *self._forward_boundary_args(),
                     *self._service_args(),
                 )
-                self.assertGreater(capture["raw_snapshot_count"], 0, capture)
+                self.assertGreater(capture["raw_sample_count"], 0, capture)
 
             if cfg.should_run_cli("select-snapshots"):
                 selected = self._run_cli(
                     "select-snapshots",
                     "--task-pack",
                     str(task_pack),
-                    *self._max_cases_args(),
+                    *self._max_groups_args(),
+                    "--max-selected-samples-per-group",
+                    str(cfg.max_selected_samples_per_group),
                 )
-                self.assertGreater(selected["selected_case_count"], 0, selected)
+                self.assertGreater(selected["selected_group_count"], 0, selected)
 
             if cfg.should_run_cli("generate-harness"):
-                self._run_cli("generate-harness", "--task-pack", str(task_pack))
+                self._run_cli(
+                    "generate-harness",
+                    "--task-pack",
+                    str(task_pack),
+                    "--candidate-function",
+                    cfg.candidate_function,
+                )
 
             ran_probe_env = False
             if cfg.should_run_cli("probe-env") and cfg.run_probe_env:
@@ -240,7 +265,7 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
             if manifest_path.exists():
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 if cfg.should_run_cli("select-snapshots"):
-                    self.assertGreater(manifest["selected_case_count"], 0)
+                    self.assertGreater(manifest["selected_group_count"], 0)
         finally:
             if tmpdir and not cfg.keep_task_pack:
                 shutil.rmtree(tmpdir, ignore_errors=True)
@@ -294,10 +319,31 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
             args.extend(["--mutable-arg-path", path])
         return args
 
-    def _max_cases_args(self) -> list[str]:
+    def _max_groups_args(self) -> list[str]:
+        if self.cfg.max_selected_groups is not None:
+            return ["--max-groups", str(self.cfg.max_selected_groups)]
         if self.cfg.max_selected_cases is not None:
             return ["--max-cases", str(self.cfg.max_selected_cases)]
         return []
+
+    def _calls_per_forward_args(self) -> list[str]:
+        if self.cfg.calls_per_forward is not None:
+            return ["--calls-per-forward", str(self.cfg.calls_per_forward)]
+        return []
+
+    def _forward_boundary_args(self) -> list[str]:
+        cfg = self.cfg
+        if not (cfg.forward_boundary_file and cfg.forward_boundary_function):
+            return []
+        args = [
+            "--forward-boundary-file",
+            cfg.forward_boundary_file,
+            "--forward-boundary-function",
+            cfg.forward_boundary_function,
+        ]
+        if cfg.forward_boundary_name:
+            args.extend(["--forward-boundary-name", cfg.forward_boundary_name])
+        return args
 
     def _non_cudagraph_service_cmd(self, service_cmd: str) -> str:
         if self.cfg.non_cudagraph_service_cmd:

@@ -17,12 +17,13 @@ source_entrypoints:
 
 kernel_abi:
   name: "gdn_extend_core_v1"
-  candidate_function: "candidate_extend"
+  candidate_function: "candidate"
   signature: |
-    candidate_extend(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc)
+    candidate(*args, **kwargs)
   required_semantics: |
-    Match the current reference implementation for TritonGDNKernel.extend on
-    all required selected snapshot cases in snapshots/manifest.json.
+    Match the captured snapshot-golden behavior on all required selected
+    samples in snapshots/manifest.json. The concrete ABI is described by each
+    selected group/sample's args_tree and kwargs_tree.
   mutable_inputs:
     - "ssm_states may be read and/or updated only if the reference semantics require it"
   forbidden_changes:

@@ -1,4 +1,4 @@
-"""Generate standalone task-pack harness files from selected snapshots."""
+"""Generate standalone task-pack harness files from selected snapshot groups."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ class SnapshotHarnessBuilder:
         self.task_pack = Path(task_pack)
         self.store = SnapshotStore(self.task_pack / "snapshots")
 
-    def generate(self, *, candidate_function: str = "candidate_extend") -> None:
+    def generate(self, *, candidate_function: str = "candidate") -> None:
         manifest = self.store.read_manifest()
         self._write_runtime()
         self._write_reference_impl(candidate_function)
@@ -28,24 +28,26 @@ class SnapshotHarnessBuilder:
         (self.task_pack / "snapshot_runtime.py").write_text(SNAPSHOT_RUNTIME, encoding="utf-8")
 
     def _write_reference_impl(self, candidate_function: str) -> None:
-        suffix = _suffix(candidate_function)
-        (self.task_pack / "reference_impl.py").write_text(REFERENCE_IMPL.format(suffix=suffix), encoding="utf-8")
+        (self.task_pack / "reference_impl.py").write_text(
+            REFERENCE_IMPL.replace("__CANDIDATE_FUNCTION__", candidate_function),
+            encoding="utf-8",
+        )
 
     def _write_candidate_impl(self, candidate_function: str) -> None:
-        suffix = _suffix(candidate_function)
-        (self.task_pack / "candidate_impl.py").write_text(CANDIDATE_IMPL.format(suffix=suffix), encoding="utf-8")
+        (self.task_pack / "candidate_impl.py").write_text(
+            CANDIDATE_IMPL.replace("__CANDIDATE_FUNCTION__", candidate_function),
+            encoding="utf-8",
+        )
 
     def _write_correctness(self, candidate_function: str) -> None:
-        suffix = _suffix(candidate_function)
         (self.task_pack / "correctness_test.py").write_text(
-            CORRECTNESS_TEST.format(candidate_function=candidate_function, suffix=suffix),
+            CORRECTNESS_TEST.replace("__CANDIDATE_FUNCTION__", candidate_function),
             encoding="utf-8",
         )
 
     def _write_benchmark(self, candidate_function: str) -> None:
-        suffix = _suffix(candidate_function)
         (self.task_pack / "benchmark.py").write_text(
-            BENCHMARK.format(candidate_function=candidate_function, suffix=suffix),
+            BENCHMARK.replace("__CANDIDATE_FUNCTION__", candidate_function),
             encoding="utf-8",
         )
 
@@ -75,64 +77,99 @@ def copy_probe_templates(template_dir: Path, task_pack: Path) -> None:
                 dst.chmod(0o755)
 
 
-def _suffix(candidate_function: str) -> str:
-    if candidate_function.startswith("candidate_"):
-        return candidate_function.removeprefix("candidate_")
-    return candidate_function
-
-
 SNAPSHOT_RUNTIME = r'''"""Standalone snapshot replay runtime copied into task packs."""
 
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 from typing import Any
 
-import torch
 
-CURRENT_CASE = None
+def _torch():
+    try:
+        import torch
+    except Exception:
+        return None
+    return torch
+
+
+CURRENT_SAMPLE = None
 
 
 def load_manifest(root: Path = Path("snapshots")) -> dict[str, Any]:
     return json.loads((root / "manifest.json").read_text())
 
 
-def list_cases(root: Path = Path("snapshots"), priority: str | None = "required") -> list[dict[str, Any]]:
+def list_groups(root: Path = Path("snapshots"), priority: str | None = "required") -> list[dict[str, Any]]:
     manifest = load_manifest(root)
-    cases = manifest.get("cases", [])
+    groups = manifest.get("case_groups", [])
     if priority is None:
-        return cases
-    return [case for case in cases if case.get("selection", {}).get("priority") == priority]
+        return groups
+    return [group for group in groups if group.get("selection", {}).get("priority") == priority]
 
 
-def load_case(case_id: str, root: Path = Path("snapshots"), device: str = "cuda") -> dict[str, Any]:
-    case_dir = root / "selected" / case_id
-    meta = json.loads((case_dir / "meta.json").read_text())
-    pre_inputs = torch.load(case_dir / meta["files"]["pre_inputs"], map_location="cpu")
-    post_inputs = torch.load(case_dir / meta["files"]["post_inputs"], map_location="cpu")
-    outputs = torch.load(case_dir / meta["files"]["outputs"], map_location="cpu")
+def list_samples(
+    root: Path = Path("snapshots"),
+    *,
+    group_id: str | None = None,
+    sample_id: str | None = None,
+    priority: str | None = "required",
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    out = []
+    for group in list_groups(root, priority=priority):
+        if group_id is not None and group["group_id"] != group_id:
+            continue
+        for sample in group.get("samples", []):
+            if sample_id is not None and sample["sample_id"] != sample_id:
+                continue
+            out.append((group, sample))
+    return out
+
+
+def load_sample(group_id: str, sample_id: str, root: Path = Path("snapshots"), device: str = "cuda") -> dict[str, Any]:
+    group_dir = root / "selected" / group_id
+    sample_dir = group_dir / "samples" / sample_id
+    group_meta = json.loads((group_dir / "group_meta.json").read_text())
+    sample_meta = json.loads((sample_dir / "meta.json").read_text())
+    pre_inputs = _load_payload(sample_dir / sample_meta["files"]["pre_inputs"])
+    post_inputs = _load_payload(sample_dir / sample_meta["files"]["post_inputs"])
+    outputs = _load_payload(sample_dir / sample_meta["files"]["outputs"])
     return {
-        "meta": meta,
+        "group": group_meta,
+        "sample_meta": sample_meta,
         "pre_inputs": tree_to_device(pre_inputs, device),
         "post_inputs": tree_to_device(post_inputs, device),
         "outputs": tree_to_device(outputs, device),
     }
 
 
-def set_current_case(case: dict[str, Any]) -> None:
-    global CURRENT_CASE
-    CURRENT_CASE = case
+def _load_payload(path: Path) -> Any:
+    torch = _torch()
+    if torch is not None:
+        try:
+            return torch.load(path, map_location="cpu")
+        except Exception:
+            pass
+    with path.open("rb") as f:
+        return pickle.load(f)
 
 
-def get_current_case() -> dict[str, Any]:
-    if CURRENT_CASE is None:
-        raise RuntimeError("No current snapshot case is set.")
-    return CURRENT_CASE
+def set_current_sample(sample: dict[str, Any]) -> None:
+    global CURRENT_SAMPLE
+    CURRENT_SAMPLE = sample
+
+
+def get_current_sample() -> dict[str, Any]:
+    if CURRENT_SAMPLE is None:
+        raise RuntimeError("No current snapshot sample is set.")
+    return CURRENT_SAMPLE
 
 
 def tree_clone(value: Any) -> Any:
-    if isinstance(value, torch.Tensor):
+    torch = _torch()
+    if torch is not None and isinstance(value, torch.Tensor):
         return value.clone()
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -146,7 +183,8 @@ def tree_clone(value: Any) -> Any:
 
 
 def tree_to_device(value: Any, device: str) -> Any:
-    if isinstance(value, torch.Tensor):
+    torch = _torch()
+    if torch is not None and isinstance(value, torch.Tensor):
         return value.to(device)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -177,55 +215,46 @@ def set_path(tree: Any, path: str, value: Any) -> None:
     for part in parts[:-1]:
         if isinstance(cur, dict):
             cur = cur[part]
-        elif isinstance(cur, list):
+        elif isinstance(cur, (list, tuple)):
             cur = cur[int(part)]
         else:
             raise KeyError(f"Cannot descend into {type(cur)!r} at {part!r}")
     last = parts[-1]
+    torch = _torch()
     if isinstance(cur, dict):
-        if last in cur and isinstance(cur[last], torch.Tensor) and isinstance(value, torch.Tensor):
-            cur[last].copy_(value)
+        old = cur.get(last)
+        if torch is not None and isinstance(old, torch.Tensor) and isinstance(value, torch.Tensor):
+            old.copy_(value)
         else:
             cur[last] = value
     elif isinstance(cur, list):
         index = int(last)
-        if isinstance(cur[index], torch.Tensor) and isinstance(value, torch.Tensor):
-            cur[index].copy_(value)
+        old = cur[index]
+        if torch is not None and isinstance(old, torch.Tensor) and isinstance(value, torch.Tensor):
+            old.copy_(value)
         else:
             cur[index] = value
+    elif isinstance(cur, tuple):
+        index = int(last)
+        old = cur[index]
+        if torch is not None and isinstance(old, torch.Tensor) and isinstance(value, torch.Tensor):
+            old.copy_(value)
+        else:
+            raise TypeError(f"Cannot assign non-tensor value into tuple path {path!r}")
     else:
         raise KeyError(f"Cannot set path {path!r}")
 
 
-def call_tree_to_extend_inputs(call_tree: dict[str, Any]) -> dict[str, Any]:
-    args = list(call_tree.get("args", ()))
-    kwargs = dict(call_tree.get("kwargs", {}))
-    names = ["q", "k", "v", "g", "beta"]
-    out = {name: args[idx] for idx, name in enumerate(names) if idx < len(args)}
-    out.update(kwargs)
-    return out
-
-
-def extend_inputs_to_call_tree(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc):
-    return {
-        "args": [q, k, v, g, beta],
-        "kwargs": {
-            "ssm_states": ssm_states,
-            "cache_indices": cache_indices,
-            "query_start_loc": query_start_loc,
-        },
-    }
-
-
-def apply_snapshot_mutations(call_tree: dict[str, Any], case: dict[str, Any]) -> None:
-    meta = case["meta"]
-    post_inputs = case["post_inputs"]
-    for path in meta.get("mutation", {}).get("mutable_arg_paths", []):
+def apply_snapshot_mutations(call_tree: dict[str, Any], sample: dict[str, Any]) -> None:
+    sample_meta = sample["sample_meta"]
+    post_inputs = sample["post_inputs"]
+    for path in sample_meta.get("mutation", {}).get("mutable_arg_paths", []):
         set_path(call_tree, path, tree_clone(get_path(post_inputs, path)))
 
 
 def assert_tree_close(actual: Any, expected: Any, *, atol: float, rtol: float, path: str = "") -> None:
-    if isinstance(expected, torch.Tensor):
+    torch = _torch()
+    if torch is not None and isinstance(expected, torch.Tensor):
         if not isinstance(actual, torch.Tensor):
             raise AssertionError(f"{path}: actual is not a tensor")
         torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
@@ -256,35 +285,29 @@ def assert_tree_close(actual: Any, expected: Any, *, atol: float, rtol: float, p
 '''
 
 
-REFERENCE_IMPL = '''"""Reference implementation generated by Framework Engineer.
-
-Default mode is snapshot-golden: it returns captured outputs and applies captured
-mutable post-state. Framework Engineer may replace this with the current reliable
-SGLang implementation for reference-replay benchmarking.
-"""
+REFERENCE_IMPL = '''"""Snapshot-golden reference implementation generated by Framework Engineer."""
 
 from __future__ import annotations
 
 import snapshot_runtime
 
 
-def reference_{suffix}(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc):
-    case = snapshot_runtime.get_current_case()
-    call_tree = snapshot_runtime.extend_inputs_to_call_tree(
-        q, k, v, g, beta,
-        ssm_states=ssm_states,
-        cache_indices=cache_indices,
-        query_start_loc=query_start_loc,
-    )
-    snapshot_runtime.apply_snapshot_mutations(call_tree, case)
-    return snapshot_runtime.tree_clone(case["outputs"])
+def reference(*args, **kwargs):
+    sample = snapshot_runtime.get_current_sample()
+    call_tree = {"args": list(args), "kwargs": kwargs}
+    snapshot_runtime.apply_snapshot_mutations(call_tree, sample)
+    return snapshot_runtime.tree_clone(sample["outputs"])
+
+
+if "__CANDIDATE_FUNCTION__" != "reference":
+    globals()["reference___CANDIDATE_FUNCTION__"] = reference
 '''
 
 
 CANDIDATE_IMPL = '''"""Candidate implementation generated for Kernel Engineer.
 
-Initial candidate delegates to reference so the task pack starts with passing
-correctness. Kernel Engineer should replace this implementation only.
+The initial candidate delegates to snapshot-golden reference so the task pack
+starts with passing correctness. Kernel Engineer should replace candidate().
 """
 
 from __future__ import annotations
@@ -292,13 +315,12 @@ from __future__ import annotations
 import reference_impl
 
 
-def candidate_{suffix}(q, k, v, g, beta, *, ssm_states, cache_indices, query_start_loc):
-    return reference_impl.reference_{suffix}(
-        q, k, v, g, beta,
-        ssm_states=ssm_states,
-        cache_indices=cache_indices,
-        query_start_loc=query_start_loc,
-    )
+def candidate(*args, **kwargs):
+    return reference_impl.reference(*args, **kwargs)
+
+
+if "__CANDIDATE_FUNCTION__" != "candidate":
+    globals()["__CANDIDATE_FUNCTION__"] = candidate
 '''
 
 
@@ -308,36 +330,41 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import candidate_impl
 import reference_impl
 import snapshot_runtime
 
 
-def run_case(case_meta, *, device: str, mode: str) -> dict:
-    case = snapshot_runtime.load_case(case_meta["case_id"], device=device)
-    snapshot_runtime.set_current_case(case)
-    tol = case["meta"].get("tolerance", {{}})
+CANDIDATE_FUNCTION = "__CANDIDATE_FUNCTION__"
+
+
+def _call(fn, call_tree):
+    return fn(*call_tree.get("args", ()), **call_tree.get("kwargs", {}))
+
+
+def run_sample(group_meta, sample_meta, *, device: str, mode: str) -> dict:
+    sample = snapshot_runtime.load_sample(group_meta["group_id"], sample_meta["sample_id"], device=device)
+    snapshot_runtime.set_current_sample(sample)
+    tol = sample["sample_meta"].get("tolerance", {})
     atol = float(tol.get("atol", 2e-2))
     rtol = float(tol.get("rtol", 2e-2))
 
-    ref_tree = snapshot_runtime.tree_clone(case["pre_inputs"])
-    cand_tree = snapshot_runtime.tree_clone(case["pre_inputs"])
-    ref_inputs = snapshot_runtime.call_tree_to_extend_inputs(ref_tree)
-    cand_inputs = snapshot_runtime.call_tree_to_extend_inputs(cand_tree)
+    ref_tree = snapshot_runtime.tree_clone(sample["pre_inputs"])
+    cand_tree = snapshot_runtime.tree_clone(sample["pre_inputs"])
 
     if mode == "reference-replay":
-        expected = reference_impl.reference_{suffix}(**ref_inputs)
+        expected = _call(reference_impl.reference, ref_tree)
         expected_mut_tree = ref_tree
     else:
-        expected = snapshot_runtime.tree_clone(case["outputs"])
-        expected_mut_tree = case["post_inputs"]
+        expected = snapshot_runtime.tree_clone(sample["outputs"])
+        expected_mut_tree = sample["post_inputs"]
 
-    actual = candidate_impl.{candidate_function}(**cand_inputs)
+    candidate = getattr(candidate_impl, CANDIDATE_FUNCTION)
+    actual = _call(candidate, cand_tree)
     snapshot_runtime.assert_tree_close(actual, expected, atol=atol, rtol=rtol)
 
-    for path in case["meta"].get("mutation", {{}}).get("mutable_arg_paths", []):
+    for path in sample["sample_meta"].get("mutation", {}).get("mutable_arg_paths", []):
         snapshot_runtime.assert_tree_close(
             snapshot_runtime.get_path(cand_tree, path),
             snapshot_runtime.get_path(expected_mut_tree, path),
@@ -346,23 +373,27 @@ def run_case(case_meta, *, device: str, mode: str) -> dict:
             path=path,
         )
 
-    return {{"case_id": case_meta["case_id"], "status": "PASS", "mode": mode}}
+    return {
+        "group_id": group_meta["group_id"],
+        "sample_id": sample_meta["sample_id"],
+        "status": "PASS",
+        "mode": mode,
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case-id", default=None)
+    parser.add_argument("--group-id", default=None)
+    parser.add_argument("--sample-id", default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--mode", choices=["reference-replay", "snapshot-golden"], default="snapshot-golden")
     parser.add_argument("--all-priorities", action="store_true")
     args = parser.parse_args()
 
     priority = None if args.all_priorities else "required"
-    cases = snapshot_runtime.list_cases(priority=priority)
-    for case in cases:
-        if args.case_id is not None and case["case_id"] != args.case_id:
-            continue
-        print(json.dumps(run_case(case, device=args.device, mode=args.mode), sort_keys=True))
+    selected = snapshot_runtime.list_samples(group_id=args.group_id, sample_id=args.sample_id, priority=priority)
+    for group, sample in selected:
+        print(json.dumps(run_sample(group, sample, device=args.device, mode=args.mode), sort_keys=True))
 
 
 if __name__ == "__main__":
@@ -378,79 +409,94 @@ import argparse
 import json
 import statistics
 import time
-
-import torch
+from collections import defaultdict
 
 import candidate_impl
 import reference_impl
 import snapshot_runtime
 
 
+CANDIDATE_FUNCTION = "__CANDIDATE_FUNCTION__"
+
+
+def _torch():
+    try:
+        import torch
+    except Exception:
+        return None
+    return torch
+
+
 def sync() -> None:
-    if torch.cuda.is_available():
+    torch = _torch()
+    if torch is not None and torch.cuda.is_available():
         torch.cuda.synchronize()
 
 
-def run_reference(inputs):
-    return reference_impl.reference_{suffix}(**inputs)
-
-
-def run_candidate(inputs):
-    return candidate_impl.{candidate_function}(**inputs)
+def _call(fn, call_tree):
+    return fn(*call_tree.get("args", ()), **call_tree.get("kwargs", {}))
 
 
 def elapsed_us(fn, make_inputs, *, warmup: int, repeat: int, use_cuda_events: bool) -> dict:
+    torch = _torch()
     for _ in range(warmup):
-        fn(make_inputs())
+        _call(fn, make_inputs())
     sync()
 
     values = []
     for _ in range(repeat):
         inputs = make_inputs()
         sync()
-        if use_cuda_events and torch.cuda.is_available():
+        if use_cuda_events and torch is not None and torch.cuda.is_available():
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            fn(inputs)
+            _call(fn, inputs)
             end.record()
             sync()
             values.append(float(start.elapsed_time(end) * 1000.0))
         else:
             start_t = time.perf_counter()
-            fn(inputs)
+            _call(fn, inputs)
             sync()
             values.append((time.perf_counter() - start_t) * 1_000_000.0)
-    return {{
+    return {
         "median_us": statistics.median(values),
         "mean_us": statistics.mean(values),
         "min_us": min(values),
         "max_us": max(values),
-    }}
+    }
 
 
-def benchmark_case(case_meta, *, device: str, target: str, warmup: int, repeat: int) -> None:
-    case = snapshot_runtime.load_case(case_meta["case_id"], device=device)
-    snapshot_runtime.set_current_case(case)
+def benchmark_sample(group_meta, sample_meta, *, device: str, target: str, warmup: int, repeat: int) -> dict:
+    sample = snapshot_runtime.load_sample(group_meta["group_id"], sample_meta["sample_id"], device=device)
+    snapshot_runtime.set_current_sample(sample)
 
     def make_inputs():
-        tree = snapshot_runtime.tree_clone(case["pre_inputs"])
-        return snapshot_runtime.call_tree_to_extend_inputs(tree)
+        return snapshot_runtime.tree_clone(sample["pre_inputs"])
 
-    result = {{"case_id": case_meta["case_id"], "warmup": warmup, "repeat": repeat}}
+    result = {
+        "record_type": "sample",
+        "group_id": group_meta["group_id"],
+        "sample_id": sample_meta["sample_id"],
+        "warmup": warmup,
+        "repeat": repeat,
+    }
     use_events = device.startswith("cuda")
+    candidate = getattr(candidate_impl, CANDIDATE_FUNCTION)
     if target in ("reference", "both"):
-        result["reference"] = elapsed_us(run_reference, make_inputs, warmup=warmup, repeat=repeat, use_cuda_events=use_events)
+        result["reference"] = elapsed_us(reference_impl.reference, make_inputs, warmup=warmup, repeat=repeat, use_cuda_events=use_events)
     if target in ("candidate", "both"):
-        result["candidate"] = elapsed_us(run_candidate, make_inputs, warmup=warmup, repeat=repeat, use_cuda_events=use_events)
+        result["candidate"] = elapsed_us(candidate, make_inputs, warmup=warmup, repeat=repeat, use_cuda_events=use_events)
     if "reference" in result and "candidate" in result and result["candidate"]["median_us"] > 0:
         result["speedup_median"] = result["reference"]["median_us"] / result["candidate"]["median_us"]
-    print(json.dumps(result, sort_keys=True))
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case-id", default=None)
+    parser.add_argument("--group-id", default=None)
+    parser.add_argument("--sample-id", default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--target", choices=["reference", "candidate", "both"], default="both")
     parser.add_argument("--warmup", type=int, default=20)
@@ -459,11 +505,25 @@ def main() -> None:
     args = parser.parse_args()
 
     priority = None if args.all_priorities else "required"
-    cases = snapshot_runtime.list_cases(priority=priority)
-    for case in cases:
-        if args.case_id is not None and case["case_id"] != args.case_id:
-            continue
-        benchmark_case(case, device=args.device, target=args.target, warmup=args.warmup, repeat=args.repeat)
+    selected = snapshot_runtime.list_samples(group_id=args.group_id, sample_id=args.sample_id, priority=priority)
+    by_group = defaultdict(list)
+    for group, sample in selected:
+        result = benchmark_sample(group, sample, device=args.device, target=args.target, warmup=args.warmup, repeat=args.repeat)
+        by_group[group["group_id"]].append(result)
+        print(json.dumps(result, sort_keys=True))
+
+    for group_id, rows in sorted(by_group.items()):
+        summary = {"record_type": "group_summary", "group_id": group_id, "sample_count": len(rows)}
+        for target_name in ("reference", "candidate"):
+            medians = [row[target_name]["median_us"] for row in rows if target_name in row]
+            if medians:
+                summary[target_name] = {
+                    "median_of_sample_medians_us": statistics.median(medians),
+                    "mean_of_sample_medians_us": statistics.mean(medians),
+                    "min_sample_median_us": min(medians),
+                    "max_sample_median_us": max(medians),
+                }
+        print(json.dumps(summary, sort_keys=True))
 
 
 if __name__ == "__main__":
@@ -491,11 +551,17 @@ RUN_NCU = '''#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CASE_ID="${1:-}"
-if [ -z "$CASE_ID" ]; then
-  echo "usage: bash scripts/run_ncu.sh <case_id>" >&2
+GROUP_ID="${1:-}"
+SAMPLE_ID="${2:-}"
+if [ -z "$GROUP_ID" ]; then
+  echo "usage: bash scripts/run_ncu.sh <group_id> [sample_id]" >&2
   exit 2
 fi
 
-ncu --set full --target-processes all "${PYTHON:-python3}" benchmark.py --case-id "$CASE_ID" --device "${DEVICE:-cuda}" --target "${TARGET:-candidate}" --warmup "${WARMUP:-5}" --repeat "${REPEAT:-20}"
+args=(benchmark.py --group-id "$GROUP_ID" --device "${DEVICE:-cuda}" --target "${TARGET:-candidate}" --warmup "${WARMUP:-5}" --repeat "${REPEAT:-20}")
+if [ -n "$SAMPLE_ID" ]; then
+  args+=(--sample-id "$SAMPLE_ID")
+fi
+
+ncu --set full --target-processes all "${PYTHON:-python3}" "${args[@]}"
 '''

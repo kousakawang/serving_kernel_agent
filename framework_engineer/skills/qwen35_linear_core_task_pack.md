@@ -26,6 +26,11 @@
 
 `shape_list.json` 只是 selected snapshots 的摘要。UT 和 benchmark 必须从 `snapshots/selected/` replay 输入。
 
+Phase 1 snapshot 按 forward window 内的 shape group 组织：`hit_count`
+用于选择高频 group；每个 group 下保留多个真实 samples，供 Kernel Engineer
+观察同 shape 下的真实输入分布。Framework Engineer 不需要判断哪些 tensor
+value 会影响 kernel 控制流。
+
 ## 推荐接口边界
 
 优先插在 core kernel wrapper 调用前：
@@ -83,4 +88,3 @@ bash scripts/run_benchmark.sh
 ```
 
 如果这两条命令不能运行，task pack 不完整。
-

@@ -1,23 +1,33 @@
-"""Runtime helpers for probing calls and capturing raw snapshots."""
+"""Runtime helpers for probing calls and capturing grouped snapshots."""
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import json
+import os
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
 from . import hashing
-from .models import SCHEMA_VERSION, SnapshotCase
+from .models import SCHEMA_VERSION, SnapshotSample
 from .store import SnapshotStore
-from .tree import tree_meta, tree_to_cpu
+from .tree import get_path, tree_meta, tree_to_cpu
+
+
+_CURRENT_FORWARD_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "kernel_agent_current_forward_id",
+    default=None,
+)
+_FORWARD_SEQ: defaultdict[str, int] = defaultdict(int)
 
 
 def _torch():
     try:
         import torch
-    except Exception:
+    except Exception:  # pragma: no cover - torch may be absent on local hosts.
         return None
     return torch
 
@@ -28,7 +38,36 @@ def _sync_cuda() -> None:
         torch.cuda.synchronize()
 
 
-def make_probe_decorator(log_path: str | Path, target_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def current_forward_id() -> str | None:
+    return _CURRENT_FORWARD_ID.get()
+
+
+def make_forward_boundary_decorator(boundary_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Return a decorator that marks a high-level forward window."""
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            qualified = boundary_name or f"{fn.__module__}.{fn.__qualname__}"
+            seq = _FORWARD_SEQ[qualified]
+            _FORWARD_SEQ[qualified] += 1
+            forward_id = f"{os.getpid()}:{qualified}:{seq:06d}"
+            token = _CURRENT_FORWARD_ID.set(forward_id)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _CURRENT_FORWARD_ID.reset(token)
+
+        return wrapper
+
+    return decorate
+
+
+def make_probe_decorator(
+    log_path: str | Path,
+    target_name: str,
+    drop_first_arg: bool = False,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Return a decorator that logs calls without saving tensor payloads."""
     path = Path(log_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,12 +75,17 @@ def make_probe_decorator(log_path: str | Path, target_name: str) -> Callable[[Ca
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            captured_args = args[1:] if drop_first_arg else args
             record = {
                 "target": target_name,
                 "qualified_name": f"{fn.__module__}.{fn.__qualname__}",
                 "time": time.time(),
-                "arg_count": len(args),
+                "forward_id": current_forward_id(),
+                "positional_arg_count": len(args),
+                "kwarg_count": len(kwargs),
                 "kwarg_keys": sorted(kwargs),
+                "drop_first_arg": bool(drop_first_arg),
+                "captured_positional_arg_count": len(captured_args),
             }
             with path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, sort_keys=True) + "\n")
@@ -53,7 +97,7 @@ def make_probe_decorator(log_path: str | Path, target_name: str) -> Callable[[Ca
 
 
 class SnapshotRecorder:
-    """Capture pre inputs, outputs, and post inputs for a Python-callable target."""
+    """Capture grouped pre inputs, outputs, and post inputs for a target."""
 
     def __init__(
         self,
@@ -65,7 +109,10 @@ class SnapshotRecorder:
         mutable_arg_paths: list[str] | None = None,
         tolerance: dict[str, float] | None = None,
         drop_first_arg: bool = False,
-        max_raw_cases: int | None = None,
+        calls_per_forward: int | None = None,
+        max_capture_groups: int = 64,
+        max_samples_per_group: int = 8,
+        max_samples_per_forward_per_group: int = 3,
     ):
         self.store = store
         self.store.ensure()
@@ -75,52 +122,98 @@ class SnapshotRecorder:
         self.mutable_arg_paths = mutable_arg_paths or []
         self.tolerance = tolerance or {"atol": 2e-2, "rtol": 2e-2}
         self.drop_first_arg = drop_first_arg
-        self.max_raw_cases = max_raw_cases
-        self.call_index = len(self.store.list_raw_cases())
+        self.calls_per_forward = calls_per_forward
+        self.max_capture_groups = max_capture_groups
+        self.max_samples_per_group = max_samples_per_group
+        self.max_samples_per_forward_per_group = max_samples_per_forward_per_group
+        index = self.store.read_raw_index()
+        self.call_index_global = int(index.get("total_hit_count", 0))
+        self.forward_call_counts: dict[str, int] = {}
 
     def decorate(self, fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if self.max_raw_cases is not None and self.call_index >= self.max_raw_cases:
-                return fn(*args, **kwargs)
+            call_index_global = self.call_index_global
+            self.call_index_global += 1
+            forward_id = self._resolve_forward_id(call_index_global)
+            call_index_in_forward = self.forward_call_counts.get(forward_id, 0)
+            self.forward_call_counts[forward_id] = call_index_in_forward + 1
+
             capture_args = args[1:] if self.drop_first_arg else args
             pre_inputs = {"args": tree_to_cpu(tuple(capture_args)), "kwargs": tree_to_cpu(dict(kwargs))}
+            self._validate_mutable_paths(pre_inputs, "pre_inputs")
+            input_meta = tree_meta(pre_inputs)
+            shape_digest = hashing.shape_hash(self.target, input_meta)
+            group_digest = hashing.group_key(self.target, input_meta)
+
+            should_track, should_save, sample_id, reason = self._plan_capture(
+                group_digest,
+                shape_digest,
+                input_meta,
+                forward_id,
+            )
+
             _sync_cuda()
             outputs = fn(*args, **kwargs)
             _sync_cuda()
+
+            if not should_track:
+                self._record_dropped_hit(group_digest)
+                return outputs
+
+            if not should_save:
+                self._record_group_hit(group_digest, forward_id, call_index_global, call_index_in_forward)
+                return outputs
+
             post_inputs = {"args": tree_to_cpu(tuple(capture_args)), "kwargs": tree_to_cpu(dict(kwargs))}
+            self._validate_mutable_paths(post_inputs, "post_inputs")
             saved_outputs = tree_to_cpu(outputs)
-            self.save_call(pre_inputs, post_inputs, saved_outputs)
+            self.save_sample(
+                group_key=group_digest,
+                shape_hash=shape_digest,
+                sample_id=sample_id,
+                reason=reason,
+                pre_inputs=pre_inputs,
+                post_inputs=post_inputs,
+                outputs=saved_outputs,
+                forward_id=forward_id,
+                call_index_global=call_index_global,
+                call_index_in_forward=call_index_in_forward,
+            )
             return outputs
 
         return wrapper
 
-    def save_call(self, pre_inputs: dict[str, Any], post_inputs: dict[str, Any], outputs: Any) -> SnapshotCase:
-        torch = _torch()
-        if torch is None:
-            raise RuntimeError("Snapshot capture requires torch to save payloads.")
-
-        self.call_index += 1
-        call_id = f"call_{self.call_index:06d}"
-        call_dir = self.store.raw_case_dir(call_id)
-        call_dir.mkdir(parents=True, exist_ok=True)
-
-        torch.save(pre_inputs, call_dir / "pre_inputs.pt")
-        torch.save(post_inputs, call_dir / "post_inputs.pt")
-        torch.save(outputs, call_dir / "outputs.pt")
-
+    def save_sample(
+        self,
+        *,
+        group_key: str,
+        shape_hash: str,
+        sample_id: str,
+        reason: str,
+        pre_inputs: dict[str, Any],
+        post_inputs: dict[str, Any],
+        outputs: Any,
+        forward_id: str,
+        call_index_global: int,
+        call_index_in_forward: int,
+    ) -> SnapshotSample:
         input_meta = tree_meta(pre_inputs)
         output_meta = tree_meta(outputs, "outputs")
         post_input_meta = tree_meta(post_inputs)
-        shape_digest = hashing.shape_hash(self.target, input_meta)
-        semantic_digest = hashing.semantic_hash(shape_digest, pre_inputs, self.target)
-        value_digest = hashing.value_hash({"inputs": pre_inputs, "outputs": outputs})
-        key = hashing.case_key(SCHEMA_VERSION, self.target, semantic_digest)
+        group_id = self._group_id(group_key)
+        sample_dir = self.store.raw_sample_dir(group_id, sample_id)
+        sample_dir.mkdir(parents=True, exist_ok=True)
 
-        case = SnapshotCase(
+        serializer = self.store.save_payload(pre_inputs, sample_dir / "pre_inputs.pt")
+        self.store.save_payload(post_inputs, sample_dir / "post_inputs.pt")
+        self.store.save_payload(outputs, sample_dir / "outputs.pt")
+
+        value_digest = hashing.value_hash({"inputs": pre_inputs, "outputs": outputs})
+        sample = SnapshotSample(
             task_id=self.task_id,
-            case_id=call_id,
-            raw_call_ids=[call_id],
+            group_id=group_id,
+            sample_id=sample_id,
             target=self.target,
             interface={
                 "signature": self.signature,
@@ -133,22 +226,161 @@ class SnapshotRecorder:
                 "pre_inputs": "pre_inputs.pt",
                 "post_inputs": "post_inputs.pt",
                 "outputs": "outputs.pt",
+                "serializer": serializer,
             },
             mutation={
                 "mutable_arg_paths": list(self.mutable_arg_paths),
                 "compare_mutations": bool(self.mutable_arg_paths),
             },
             hashes={
-                "shape_hash": shape_digest,
-                "semantic_hash": semantic_digest,
+                "shape_hash": shape_hash,
+                "group_key": group_key,
                 "value_hash": value_digest,
-                "case_key": key,
+                "sample_key": hashing.short_hash(
+                    {"schema_version": SCHEMA_VERSION, "group_key": group_key, "value_hash": value_digest},
+                    16,
+                ),
             },
-            selection={"call_count": 1, "priority": "raw", "reason": "captured_call"},
+            capture={
+                "forward_id": forward_id,
+                "call_index_global": call_index_global,
+                "call_index_in_forward": call_index_in_forward,
+                "time": time.time(),
+                "reason": reason,
+            },
             tolerance=self.tolerance,
         )
-        self.store.write_case_meta(call_dir, case)
-        return case
+        self.store.write_sample_meta(sample_dir, sample)
+        self._record_group_hit(
+            group_key,
+            forward_id,
+            call_index_global,
+            call_index_in_forward,
+            saved_sample=sample,
+        )
+        return sample
+
+    def _resolve_forward_id(self, call_index_global: int) -> str:
+        explicit = current_forward_id()
+        if explicit:
+            return explicit
+        if self.calls_per_forward and self.calls_per_forward > 0:
+            return f"{os.getpid()}:calls_per_forward:{call_index_global // self.calls_per_forward:06d}"
+        return "unknown"
+
+    def _plan_capture(
+        self,
+        group_key: str,
+        shape_hash: str,
+        input_meta: dict[str, Any],
+        forward_id: str,
+    ) -> tuple[bool, bool, str, str]:
+        index = self.store.read_raw_index()
+        groups = index.setdefault("groups", {})
+        group_id = self._group_id(group_key)
+        group = groups.get(group_key)
+        if group is None and len(groups) >= self.max_capture_groups:
+            return False, False, "", "max_capture_groups_reached"
+
+        if group is None:
+            return True, True, "sample_0001", "first_group_sample"
+
+        if int(group.get("sample_count", 0)) >= self.max_samples_per_group:
+            return True, False, "", "max_samples_per_group_reached"
+        per_forward = group.get("samples_per_forward", {})
+        if int(per_forward.get(forward_id, 0)) >= self.max_samples_per_forward_per_group:
+            return True, False, "", "max_samples_per_forward_per_group_reached"
+        sample_id = f"sample_{int(group.get('sample_count', 0)) + 1:04d}"
+        reason = "cross_forward_sample" if forward_id not in set(group.get("forward_ids", [])) else "same_forward_sample"
+        return True, True, sample_id, reason
+
+    def _record_group_hit(
+        self,
+        group_key: str,
+        forward_id: str,
+        call_index_global: int,
+        call_index_in_forward: int,
+        *,
+        saved_sample: SnapshotSample | None = None,
+    ) -> None:
+        index = self.store.read_raw_index()
+        index.setdefault("schema_version", SCHEMA_VERSION)
+        index.setdefault("index_type", "raw_group_index")
+        groups = index.setdefault("groups", {})
+        group_id = self._group_id(group_key)
+        if group_key not in groups:
+            if saved_sample is None:
+                return
+            groups[group_key] = {
+                "task_id": self.task_id,
+                "group_id": group_id,
+                "group_key": group_key,
+                "shape_hash": saved_sample.hashes["shape_hash"],
+                "target": saved_sample.target,
+                "interface": saved_sample.interface,
+                "mutation": saved_sample.mutation,
+                "tolerance": saved_sample.tolerance,
+                "total_hit_count": 0,
+                "forward_ids": [],
+                "forward_hit_count": 0,
+                "sample_count": 0,
+                "samples": [],
+                "samples_per_forward": {},
+                "first_seen": None,
+                "last_seen": None,
+            }
+        group = groups[group_key]
+        group["total_hit_count"] = int(group.get("total_hit_count", 0)) + 1
+        forward_ids = list(group.get("forward_ids", []))
+        if forward_id not in forward_ids:
+            forward_ids.append(forward_id)
+        group["forward_ids"] = forward_ids
+        group["forward_hit_count"] = len(forward_ids)
+        group["last_seen"] = {
+            "forward_id": forward_id,
+            "call_index_global": call_index_global,
+            "call_index_in_forward": call_index_in_forward,
+        }
+        if group.get("first_seen") is None:
+            group["first_seen"] = dict(group["last_seen"])
+        if saved_sample is not None:
+            samples = list(group.get("samples", []))
+            samples.append(
+                {
+                    "sample_id": saved_sample.sample_id,
+                    "group_id": saved_sample.group_id,
+                    "sample_dir": f"raw/{saved_sample.group_id}/{saved_sample.sample_id}",
+                    "hashes": saved_sample.hashes,
+                    "capture": saved_sample.capture,
+                    "files": saved_sample.files,
+                }
+            )
+            group["samples"] = samples
+            group["sample_count"] = len(samples)
+            per_forward = dict(group.get("samples_per_forward", {}))
+            per_forward[forward_id] = int(per_forward.get(forward_id, 0)) + 1
+            group["samples_per_forward"] = per_forward
+        groups[group_key] = group
+        self.store.write_raw_index(index)
+
+    def _record_dropped_hit(self, group_key: str) -> None:
+        index = self.store.read_raw_index()
+        index["dropped_hit_count"] = int(index.get("dropped_hit_count", 0)) + 1
+        dropped_groups = index.setdefault("dropped_group_keys", [])
+        if group_key not in dropped_groups:
+            dropped_groups.append(group_key)
+        self.store.write_raw_index(index)
+
+    def _validate_mutable_paths(self, tree: dict[str, Any], tree_name: str) -> None:
+        for path in self.mutable_arg_paths:
+            try:
+                get_path(tree, path)
+            except Exception as exc:
+                raise KeyError(f"mutable_arg_path {path!r} not found in captured {tree_name}") from exc
+
+    @staticmethod
+    def _group_id(group_key: str) -> str:
+        return f"group_{group_key[:12]}"
 
 
 def make_snapshot_decorator(
@@ -161,7 +393,10 @@ def make_snapshot_decorator(
     backend: str = "",
     layer_id: str = "",
     drop_first_arg: bool = False,
-    max_raw_cases: int | str | None = None,
+    calls_per_forward: int | str | None = None,
+    max_capture_groups: int | str = 64,
+    max_samples_per_group: int | str = 8,
+    max_samples_per_forward_per_group: int | str = 3,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     paths = [p.strip() for p in mutable_arg_paths.split(",") if p.strip()]
     target = {
@@ -178,6 +413,9 @@ def make_snapshot_decorator(
         signature=signature,
         mutable_arg_paths=paths,
         drop_first_arg=drop_first_arg,
-        max_raw_cases=int(max_raw_cases) if max_raw_cases not in (None, "") else None,
+        calls_per_forward=int(calls_per_forward) if calls_per_forward not in (None, "") else None,
+        max_capture_groups=int(max_capture_groups),
+        max_samples_per_group=int(max_samples_per_group),
+        max_samples_per_forward_per_group=int(max_samples_per_forward_per_group),
     )
     return recorder.decorate
