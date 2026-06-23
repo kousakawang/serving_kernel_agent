@@ -134,7 +134,7 @@ def _update_value_hash(hasher: "hashlib._Hash", value: Any) -> None:
         tensor = value.detach().cpu().contiguous()
         hasher.update(str(tensor.dtype).encode())
         hasher.update(str(list(tensor.shape)).encode())
-        data = tensor.numpy().tobytes()
+        data = _tensor_bytes(tensor)
         if len(data) > 1_000_000:
             third = max(1, len(data) // 3)
             data = data[:third] + data[len(data) // 2 : len(data) // 2 + third] + data[-third:]
@@ -160,6 +160,32 @@ def _update_value_hash(hasher: "hashlib._Hash", value: Any) -> None:
             _update_value_hash(hasher, value[key])
         return
     raise TypeError(f"Unsupported value for hashing: {type(value)!r}")
+
+
+def _tensor_bytes(tensor: Any) -> bytes:
+    """Return raw tensor bytes for value hashing.
+
+    Some PyTorch dtypes, notably bfloat16, cannot be converted to NumPy
+    directly on CPU. In those cases, hash the contiguous uint8 view instead.
+    """
+    try:
+        return tensor.numpy().tobytes()
+    except (TypeError, RuntimeError):
+        try:
+            return tensor.view(_torch_uint8(tensor)).numpy().tobytes()
+        except Exception:
+            import io
+            import torch
+
+            buffer = io.BytesIO()
+            torch.save(tensor, buffer)
+            return buffer.getvalue()
+
+
+def _torch_uint8(tensor: Any) -> Any:
+    import torch
+
+    return torch.uint8
 
 
 def _sequence_feature(value: Any) -> dict[str, Any]:

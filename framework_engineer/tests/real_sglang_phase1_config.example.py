@@ -57,9 +57,11 @@ target_layer_id = ""
 # Set False if target function is not an instance/class method.
 drop_first_arg = True
 
-# Multiple paths are allowed, for example:
-# mutable_arg_paths = ["kwargs.ssm_states", "kwargs.conv_states"]
-mutable_arg_paths = ["kwargs.ssm_states"]
+# Optional: only set paths for inputs that the target mutates in-place and that
+# correctness should compare after candidate execution. Most FLA chunk kernels
+# should leave this empty. GDN stateful kernels may use paths such as
+# ["kwargs.ssm_states"].
+mutable_arg_paths = []
 
 # FLA chunk free functions usually use:
 #

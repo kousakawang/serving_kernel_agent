@@ -316,6 +316,7 @@ def cmd_capture_snapshots(args: argparse.Namespace) -> int:
         "raw_snapshot_count": raw_index.get("raw_sample_count", 0),
         "total_hit_count": raw_index.get("total_hit_count", 0),
         "dropped_hit_count": raw_index.get("dropped_hit_count", 0),
+        "mutation_warning_count": _mutation_warning_count(raw_index),
         "workload_returncode": result["workload"]["returncode"],
         "service_cmd": service_cmd,
         "workload_cmd": args.workload_cmd,
@@ -755,6 +756,14 @@ def _windowing_mode(args: argparse.Namespace) -> str:
     if getattr(args, "calls_per_forward", None):
         return "calls_per_forward"
     return "unknown_forward"
+
+
+def _mutation_warning_count(raw_index: dict[str, Any]) -> int:
+    count = 0
+    for group in raw_index.get("groups", {}).values():
+        for sample in group.get("samples", []):
+            count += int(sample.get("capture", {}).get("mutation_warning_count", 0))
+    return count
 
 
 class _temporary_decorator:

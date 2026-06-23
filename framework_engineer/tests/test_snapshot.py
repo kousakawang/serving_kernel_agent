@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover
     torch = None
 
 from kernel_agent.framework_engineer.snapshot.harness_builder import SnapshotHarnessBuilder
+from kernel_agent.framework_engineer.snapshot.hashing import value_hash
 from kernel_agent.framework_engineer.snapshot.recorder import SnapshotRecorder, make_forward_boundary_decorator
 from kernel_agent.framework_engineer.snapshot.selector import SnapshotSelector, write_shape_list_summary
 from kernel_agent.framework_engineer.snapshot.store import SnapshotStore
@@ -54,6 +55,13 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(meta["stride"], [1, 3])
         self.assertFalse(meta["is_contiguous"])
         self.assertEqual(meta["storage_offset"], 0)
+
+    @unittest.skipIf(torch is None, "torch is required for bfloat16 hash test")
+    def test_value_hash_supports_bfloat16(self) -> None:
+        tensor = torch.arange(8, dtype=torch.float32).to(torch.bfloat16)
+        digest = value_hash({"x": tensor})
+        self.assertIsInstance(digest, str)
+        self.assertEqual(len(digest), 24)
 
     def test_group_hit_count_and_sample_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

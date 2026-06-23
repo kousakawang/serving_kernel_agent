@@ -186,3 +186,7 @@ drop_first_arg = False
 signature = "candidate(*args, **kwargs)"
 mutable_arg_paths = []
 ```
+
+`mutable_arg_paths` 只用于目标接口会原地修改输入的情况，例如某些 state/cache
+更新。普通算子只返回 outputs 时保持空列表即可；如果误填了不存在的路径，
+capture 会继续运行，并在 report/meta 中记录 warning。

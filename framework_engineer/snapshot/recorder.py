@@ -141,7 +141,7 @@ class SnapshotRecorder:
 
             capture_args = args[1:] if self.drop_first_arg else args
             pre_inputs = {"args": tree_to_cpu(tuple(capture_args)), "kwargs": tree_to_cpu(dict(kwargs))}
-            self._validate_mutable_paths(pre_inputs, "pre_inputs")
+            pre_mutable_paths, pre_mutation_warnings = self._resolve_mutable_paths(pre_inputs, "pre_inputs")
             input_meta = tree_meta(pre_inputs)
             shape_digest = hashing.shape_hash(self.target, input_meta)
             group_digest = hashing.group_key(self.target, input_meta)
@@ -166,7 +166,14 @@ class SnapshotRecorder:
                 return outputs
 
             post_inputs = {"args": tree_to_cpu(tuple(capture_args)), "kwargs": tree_to_cpu(dict(kwargs))}
-            self._validate_mutable_paths(post_inputs, "post_inputs")
+            post_mutable_paths, post_mutation_warnings = self._resolve_mutable_paths(post_inputs, "post_inputs")
+            effective_mutable_paths = [path for path in pre_mutable_paths if path in set(post_mutable_paths)]
+            mutation_warnings = pre_mutation_warnings + post_mutation_warnings
+            skipped_post_paths = sorted(set(pre_mutable_paths) - set(post_mutable_paths))
+            for path in skipped_post_paths:
+                mutation_warnings.append(
+                    f"mutable_arg_path {path!r} exists in pre_inputs but not in post_inputs; mutation comparison disabled for this path"
+                )
             saved_outputs = tree_to_cpu(outputs)
             self.save_sample(
                 group_key=group_digest,
@@ -179,6 +186,8 @@ class SnapshotRecorder:
                 forward_id=forward_id,
                 call_index_global=call_index_global,
                 call_index_in_forward=call_index_in_forward,
+                effective_mutable_paths=effective_mutable_paths,
+                mutation_warnings=mutation_warnings,
             )
             return outputs
 
@@ -197,6 +206,8 @@ class SnapshotRecorder:
         forward_id: str,
         call_index_global: int,
         call_index_in_forward: int,
+        effective_mutable_paths: list[str] | None = None,
+        mutation_warnings: list[str] | None = None,
     ) -> SnapshotSample:
         input_meta = tree_meta(pre_inputs)
         output_meta = tree_meta(outputs, "outputs")
@@ -210,6 +221,8 @@ class SnapshotRecorder:
         self.store.save_payload(outputs, sample_dir / "outputs.pt")
 
         value_digest = hashing.value_hash({"inputs": pre_inputs, "outputs": outputs})
+        effective_mutable_paths = effective_mutable_paths or []
+        mutation_warnings = mutation_warnings or []
         sample = SnapshotSample(
             task_id=self.task_id,
             group_id=group_id,
@@ -229,8 +242,13 @@ class SnapshotRecorder:
                 "serializer": serializer,
             },
             mutation={
-                "mutable_arg_paths": list(self.mutable_arg_paths),
-                "compare_mutations": bool(self.mutable_arg_paths),
+                "requested_mutable_arg_paths": list(self.mutable_arg_paths),
+                "mutable_arg_paths": list(effective_mutable_paths),
+                "ignored_mutable_arg_paths": [
+                    path for path in self.mutable_arg_paths if path not in set(effective_mutable_paths)
+                ],
+                "mutation_warnings": list(mutation_warnings),
+                "compare_mutations": bool(effective_mutable_paths),
             },
             hashes={
                 "shape_hash": shape_hash,
@@ -247,6 +265,7 @@ class SnapshotRecorder:
                 "call_index_in_forward": call_index_in_forward,
                 "time": time.time(),
                 "reason": reason,
+                "mutation_warning_count": len(mutation_warnings),
             },
             tolerance=self.tolerance,
         )
@@ -371,12 +390,19 @@ class SnapshotRecorder:
             dropped_groups.append(group_key)
         self.store.write_raw_index(index)
 
-    def _validate_mutable_paths(self, tree: dict[str, Any], tree_name: str) -> None:
+    def _resolve_mutable_paths(self, tree: dict[str, Any], tree_name: str) -> tuple[list[str], list[str]]:
+        valid_paths = []
+        warnings = []
         for path in self.mutable_arg_paths:
             try:
                 get_path(tree, path)
             except Exception as exc:
-                raise KeyError(f"mutable_arg_path {path!r} not found in captured {tree_name}") from exc
+                warnings.append(
+                    f"mutable_arg_path {path!r} not found in captured {tree_name}; mutation comparison disabled for this path"
+                )
+            else:
+                valid_paths.append(path)
+        return valid_paths, warnings
 
     @staticmethod
     def _group_id(group_key: str) -> str:

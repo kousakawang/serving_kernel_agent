@@ -25,6 +25,10 @@ candidate(*args, **kwargs)
 5. 比较 outputs。
 6. 对 `mutable_arg_paths` 中的输入，比较运行后的 post-state。
 
+`mutable_arg_paths` 不是必填项。只有当目标接口会原地修改输入，并且该
+post-state 是语义的一部分时才需要配置。不存在于 captured inputs 的路径会被
+记录为 warning，并从当前 sample 的 mutation comparison 中忽略。
+
 如果 reference 不能脱离 SGLang 独立 import，允许使用 snapshot-golden fallback。此时 reference 返回 captured outputs，并把 mutable inputs 更新到 captured post-state。
 
 ## Benchmark 规则

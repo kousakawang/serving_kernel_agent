@@ -99,6 +99,8 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 "candidate(*args, **kwargs)",
                 "--mutable-arg-path",
                 "kwargs.state.total",
+                "--mutable-arg-path",
+                "kwargs.ssm_states",
                 "--drop-first-arg",
                 "--forward-boundary-file",
                 str(target_file),
@@ -116,6 +118,7 @@ class Phase1CliEndToEndTests(unittest.TestCase):
             self.assertEqual(capture["raw_group_count"], 1)
             self.assertEqual(capture["raw_sample_count"], 4)
             self.assertEqual(capture["total_hit_count"], 6)
+            self.assertGreater(capture["mutation_warning_count"], 0)
             self.assertEqual(capture["service_cmd"].count("--disable-cuda-graph"), 1)
             self.assertNotIn("@__import__", target_file.read_text(encoding="utf-8"))
 
@@ -153,6 +156,19 @@ class Phase1CliEndToEndTests(unittest.TestCase):
             manifest = json.loads((task_pack / "snapshots" / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["selected_group_count"], 1)
             self.assertEqual(manifest["selected_sample_count"], 4)
+            first_sample = manifest["case_groups"][0]["samples"][0]
+            sample_meta_path = (
+                task_pack
+                / "snapshots"
+                / "selected"
+                / manifest["case_groups"][0]["group_id"]
+                / "samples"
+                / first_sample["sample_id"]
+                / "meta.json"
+            )
+            sample_meta = json.loads(sample_meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(sample_meta["mutation"]["mutable_arg_paths"], ["kwargs.state.total"])
+            self.assertIn("kwargs.ssm_states", sample_meta["mutation"]["ignored_mutable_arg_paths"])
 
             shape_list = json.loads((task_pack / "shape_list.json").read_text(encoding="utf-8"))
             self.assertEqual(shape_list["source"], "snapshots/manifest.json")
