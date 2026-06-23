@@ -32,9 +32,11 @@ class RealSGLangConfig:
     service_cmd: str
     workload_cmd: str
     target_file: str
-    function_name: str
-    target_name: str
+    function_name: str | None = None
+    target_name: str | None = None
+    target_line: int | None = None
     forward_boundary_file: str | None = None
+    forward_boundary_line: int | None = None
     forward_boundary_function: str | None = None
     forward_boundary_name: str | None = None
 
@@ -107,10 +109,12 @@ def _load_config() -> RealSGLangConfig:
             if key.islower() and not key.startswith("_")
         }
 
-    required = ["service_cmd", "workload_cmd", "target_file", "function_name", "target_name"]
+    required = ["service_cmd", "workload_cmd", "target_file"]
     missing = [name for name in required if not raw.get(name)]
     if missing:
         raise unittest.SkipTest(f"Missing required config fields: {', '.join(missing)}")
+    if not raw.get("target_line") and not raw.get("function_name"):
+        raise unittest.SkipTest("Missing target locator: provide target_line or function_name")
     return RealSGLangConfig(**raw)
 
 
@@ -166,10 +170,7 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                     cfg.workload_cmd,
                     "--target-file",
                     cfg.target_file,
-                    "--function-name",
-                    cfg.function_name,
-                    "--target-name",
-                    cfg.target_name,
+                    *self._target_locator_args(),
                     *self._drop_first_arg(),
                     *self._forward_boundary_args(),
                     *self._service_args(),
@@ -187,10 +188,7 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
                     cfg.workload_cmd,
                     "--target-file",
                     cfg.target_file,
-                    "--function-name",
-                    cfg.function_name,
-                    "--target-name",
-                    cfg.target_name,
+                    *self._target_locator_args(),
                     "--signature",
                     cfg.signature,
                     "--mode",
@@ -313,6 +311,20 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
     def _drop_first_arg(self) -> list[str]:
         return ["--drop-first-arg"] if self.cfg.drop_first_arg else []
 
+    def _target_locator_args(self) -> list[str]:
+        cfg = self.cfg
+        if cfg.target_line is not None:
+            args = ["--target-line", str(cfg.target_line)]
+            if cfg.function_name:
+                args.extend(["--function-name", cfg.function_name])
+            if cfg.target_name:
+                args.extend(["--target-name", cfg.target_name])
+            return args
+        args = ["--function-name", str(cfg.function_name)]
+        if cfg.target_name:
+            args.extend(["--target-name", cfg.target_name])
+        return args
+
     def _mutable_arg_args(self) -> list[str]:
         args: list[str] = []
         for path in self.cfg.mutable_arg_paths:
@@ -333,14 +345,15 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
 
     def _forward_boundary_args(self) -> list[str]:
         cfg = self.cfg
-        if not (cfg.forward_boundary_file and cfg.forward_boundary_function):
+        if not cfg.forward_boundary_file:
             return []
-        args = [
-            "--forward-boundary-file",
-            cfg.forward_boundary_file,
-            "--forward-boundary-function",
-            cfg.forward_boundary_function,
-        ]
+        args = ["--forward-boundary-file", cfg.forward_boundary_file]
+        if cfg.forward_boundary_line is not None:
+            args.extend(["--forward-boundary-line", str(cfg.forward_boundary_line)])
+        elif cfg.forward_boundary_function:
+            args.extend(["--forward-boundary-function", cfg.forward_boundary_function])
+        else:
+            raise ValueError("forward_boundary_file requires forward_boundary_line or forward_boundary_function")
         if cfg.forward_boundary_name:
             args.extend(["--forward-boundary-name", cfg.forward_boundary_name])
         return args

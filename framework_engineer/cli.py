@@ -8,6 +8,7 @@ Run as:
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import json
 import os
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
@@ -29,6 +31,28 @@ from .snapshot.validation import run_smoke, validate_files
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = ROOT / "framework_engineer" / "templates"
+
+
+@dataclass(frozen=True)
+class SourceInterface:
+    file: Path
+    function_name: str
+    qualified_name: str
+    line: int
+    end_line: int | None
+    class_path: list[str]
+    module_name: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file": str(self.file),
+            "function_name": self.function_name,
+            "qualified_name": self.qualified_name,
+            "line": self.line,
+            "end_line": self.end_line,
+            "class_path": self.class_path,
+            "module_name": self.module_name,
+        }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,6 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--startup-timeout", type=int, default=120)
     p.add_argument("--workload-timeout", type=int, default=600)
     p.set_defaults(func=cmd_run_baseline)
+
+    p = sub.add_parser("resolve-interface")
+    p.add_argument("--file", type=Path, required=True)
+    p.add_argument("--line", type=int, required=True)
+    p.set_defaults(func=cmd_resolve_interface)
 
     p = sub.add_parser("probe-target-calls")
     _add_run_and_instrument_args(p)
@@ -102,10 +131,12 @@ def _add_run_and_instrument_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--non-cudagraph-service-cmd", default=None)
     parser.add_argument("--workload-cmd", required=True)
     parser.add_argument("--target-file", type=Path, required=True)
-    parser.add_argument("--function-name", required=True)
-    parser.add_argument("--target-name", required=True)
+    parser.add_argument("--target-line", type=int, default=None)
+    parser.add_argument("--function-name", default=None)
+    parser.add_argument("--target-name", default=None)
     parser.add_argument("--drop-first-arg", action="store_true")
     parser.add_argument("--forward-boundary-file", type=Path, default=None)
+    parser.add_argument("--forward-boundary-line", type=int, default=None)
     parser.add_argument("--forward-boundary-function", default=None)
     parser.add_argument("--forward-boundary-name", default=None)
     parser.add_argument("--health-url", default=None)
@@ -191,17 +222,37 @@ def cmd_run_baseline(args: argparse.Namespace) -> int:
     return 0 if result["workload"]["returncode"] == 0 else 1
 
 
+def cmd_resolve_interface(args: argparse.Namespace) -> int:
+    interface = _resolve_source_interface(
+        file=args.file,
+        line=args.line,
+        function_name=None,
+        qualified_name=None,
+        role="interface",
+    )
+    payload = {
+        **interface.to_dict(),
+        "target_file": str(interface.file),
+        "function_name": interface.function_name,
+        "target_name": interface.qualified_name,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def cmd_probe_target_calls(args: argparse.Namespace) -> int:
     docs = args.task_pack / "docs"
     docs.mkdir(parents=True, exist_ok=True)
     log_path = docs / "target_call_probe.jsonl"
+    target = _resolve_target_interface(args)
+    boundary = _resolve_forward_boundary_interface(args)
     decorator_expr = (
         "__import__('kernel_agent.framework_engineer.snapshot.recorder', "
         "fromlist=['make_probe_decorator']).make_probe_decorator("
-        f"{str(log_path)!r}, {args.target_name!r}, drop_first_arg={bool(args.drop_first_arg)!r})"
+        f"{str(log_path)!r}, {target.qualified_name!r}, drop_first_arg={bool(args.drop_first_arg)!r})"
     )
     service_cmd = _resolve_non_cudagraph_service_cmd(args.service_cmd, args.non_cudagraph_service_cmd)
-    with _instrumentation_context(args, decorator_expr):
+    with _instrumentation_context(target, boundary, decorator_expr):
         result = _run_service_and_workload(
             service_cmd=service_cmd,
             workload_cmd=args.workload_cmd,
@@ -211,7 +262,9 @@ def cmd_probe_target_calls(args: argparse.Namespace) -> int:
         )
     calls = _read_jsonl(log_path)
     report = {
-        "target_name": args.target_name,
+        "target_name": target.qualified_name,
+        "target_interface": target.to_dict(),
+        "forward_boundary_interface": boundary.to_dict() if boundary else None,
         "call_count": len(calls),
         "workload_returncode": result["workload"]["returncode"],
         "log_path": str(log_path),
@@ -231,10 +284,12 @@ def cmd_capture_snapshots(args: argparse.Namespace) -> int:
     snapshot_root = args.task_pack / "snapshots"
     mutable_paths = ",".join(args.mutable_arg_path)
     max_capture_groups = args.max_raw_cases if args.max_raw_cases is not None else args.max_capture_groups
+    target = _resolve_target_interface(args)
+    boundary = _resolve_forward_boundary_interface(args)
     decorator_expr = (
         "__import__('kernel_agent.framework_engineer.snapshot.recorder', "
         "fromlist=['make_snapshot_decorator']).make_snapshot_decorator("
-        f"{str(snapshot_root)!r}, {args.task_pack.name!r}, {args.target_name!r}, {args.signature!r}, "
+        f"{str(snapshot_root)!r}, {args.task_pack.name!r}, {target.qualified_name!r}, {args.signature!r}, "
         f"mutable_arg_paths={mutable_paths!r}, mode={args.mode!r}, backend={args.backend!r}, "
         f"layer_id={args.layer_id!r}, drop_first_arg={bool(args.drop_first_arg)!r}, "
         f"calls_per_forward={args.calls_per_forward!r}, max_capture_groups={max_capture_groups!r}, "
@@ -242,7 +297,7 @@ def cmd_capture_snapshots(args: argparse.Namespace) -> int:
         f"max_samples_per_forward_per_group={args.max_samples_per_forward_per_group!r})"
     )
     service_cmd = _resolve_non_cudagraph_service_cmd(args.service_cmd, args.non_cudagraph_service_cmd)
-    with _instrumentation_context(args, decorator_expr):
+    with _instrumentation_context(target, boundary, decorator_expr):
         result = _run_service_and_workload(
             service_cmd=service_cmd,
             workload_cmd=args.workload_cmd,
@@ -252,7 +307,9 @@ def cmd_capture_snapshots(args: argparse.Namespace) -> int:
         )
     raw_index = SnapshotStore(snapshot_root).read_raw_index()
     report = {
-        "target_name": args.target_name,
+        "target_name": target.qualified_name,
+        "target_interface": target.to_dict(),
+        "forward_boundary_interface": boundary.to_dict() if boundary else None,
         "windowing_mode": _windowing_mode(args),
         "raw_group_count": raw_index.get("raw_group_count", 0),
         "raw_sample_count": raw_index.get("raw_sample_count", 0),
@@ -505,17 +562,166 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
-def _instrumentation_context(args: argparse.Namespace, target_decorator_expr: str):
+def _resolve_target_interface(args: argparse.Namespace) -> SourceInterface:
+    return _resolve_source_interface(
+        file=args.target_file,
+        line=args.target_line,
+        function_name=args.function_name,
+        qualified_name=args.target_name,
+        role="target",
+    )
+
+
+def _resolve_forward_boundary_interface(args: argparse.Namespace) -> SourceInterface | None:
+    if args.forward_boundary_file is None:
+        return None
+    return _resolve_source_interface(
+        file=args.forward_boundary_file,
+        line=args.forward_boundary_line,
+        function_name=args.forward_boundary_function,
+        qualified_name=args.forward_boundary_name,
+        role="forward boundary",
+    )
+
+
+def _resolve_source_interface(
+    *,
+    file: Path,
+    line: int | None,
+    function_name: str | None,
+    qualified_name: str | None,
+    role: str,
+) -> SourceInterface:
+    file = file.expanduser().resolve()
+    if not file.exists():
+        raise SystemExit(f"{role}: file does not exist: {file}")
+    source = file.read_text(encoding="utf-8")
+    module_name = _infer_module_name(file)
+    if line is not None:
+        resolved = _resolve_interface_by_line(file, source, line, module_name)
+        if function_name is not None and function_name != resolved.function_name:
+            raise SystemExit(
+                f"{role}: --function-name {function_name!r} does not match function at line {line}: "
+                f"{resolved.function_name!r}"
+            )
+        if qualified_name is not None:
+            return SourceInterface(
+                file=resolved.file,
+                function_name=resolved.function_name,
+                qualified_name=qualified_name,
+                line=resolved.line,
+                end_line=resolved.end_line,
+                class_path=resolved.class_path,
+                module_name=resolved.module_name,
+            )
+        return resolved
+    if function_name is None:
+        raise SystemExit(f"{role}: provide either --{_role_prefix(role)}-line or --function-name")
+    resolved = _resolve_interface_by_function_name(file, source, function_name, module_name)
+    if qualified_name is not None:
+        return SourceInterface(
+            file=resolved.file,
+            function_name=resolved.function_name,
+            qualified_name=qualified_name,
+            line=resolved.line,
+            end_line=resolved.end_line,
+            class_path=resolved.class_path,
+            module_name=resolved.module_name,
+        )
+    return resolved
+
+
+def _role_prefix(role: str) -> str:
+    return "forward-boundary" if role == "forward boundary" else "target"
+
+
+def _resolve_interface_by_line(file: Path, source: str, line: int, module_name: str) -> SourceInterface:
+    candidates = _function_candidates(file, source, module_name)
+    matching = [
+        candidate
+        for candidate in candidates
+        if candidate.line <= line <= (candidate.end_line or candidate.line)
+    ]
+    if not matching:
+        raise SystemExit(f"No function definition in {file} contains line {line}")
+    return min(matching, key=lambda item: ((item.end_line or item.line) - item.line, -len(item.class_path)))
+
+
+def _resolve_interface_by_function_name(file: Path, source: str, function_name: str, module_name: str) -> SourceInterface:
+    matches = [candidate for candidate in _function_candidates(file, source, module_name) if candidate.function_name == function_name]
+    if not matches:
+        raise SystemExit(f"Could not find function definition {function_name!r} in {file}")
+    return sorted(matches, key=lambda item: item.line)[0]
+
+
+def _function_candidates(file: Path, source: str, module_name: str) -> list[SourceInterface]:
+    tree = ast.parse(source, filename=str(file))
+    out: list[SourceInterface] = []
+
+    def visit(node: ast.AST, class_path: list[str]) -> None:
+        if isinstance(node, ast.ClassDef):
+            for child in node.body:
+                visit(child, [*class_path, node.name])
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parts = [module_name, *class_path, node.name]
+            out.append(
+                SourceInterface(
+                    file=file,
+                    function_name=node.name,
+                    qualified_name=".".join(part for part in parts if part),
+                    line=int(node.lineno),
+                    end_line=getattr(node, "end_lineno", None),
+                    class_path=list(class_path),
+                    module_name=module_name,
+                )
+            )
+            for child in node.body:
+                visit(child, class_path)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, class_path)
+
+    visit(tree, [])
+    return out
+
+
+def _infer_module_name(file: Path) -> str:
+    parts = list(file.with_suffix("").parts)
+    if "python" in parts:
+        idx = len(parts) - 1 - list(reversed(parts)).index("python")
+        module_parts = parts[idx + 1 :]
+        if module_parts:
+            return ".".join(module_parts)
+    return file.stem
+
+
+def _instrumentation_context(
+    target: SourceInterface,
+    boundary: SourceInterface | None,
+    target_decorator_expr: str,
+):
     stack = contextlib.ExitStack()
-    if args.forward_boundary_file and args.forward_boundary_function:
-        boundary_name = args.forward_boundary_name or args.forward_boundary_function
+    entries: list[tuple[SourceInterface, str]] = []
+    if boundary is not None:
+        boundary_name = boundary.qualified_name
         boundary_expr = (
             "__import__('kernel_agent.framework_engineer.snapshot.recorder', "
             "fromlist=['make_forward_boundary_decorator']).make_forward_boundary_decorator("
             f"{boundary_name!r})"
         )
-        stack.enter_context(_temporary_decorator(args.forward_boundary_file, args.forward_boundary_function, boundary_expr))
-    stack.enter_context(_temporary_decorator(args.target_file, args.function_name, target_decorator_expr))
+        entries.append((boundary, boundary_expr))
+    entries.append((target, target_decorator_expr))
+
+    by_file: dict[Path, list[tuple[SourceInterface, str]]] = {}
+    for interface, expr in entries:
+        by_file.setdefault(interface.file, []).append((interface, expr))
+    for file, file_entries in by_file.items():
+        if len(file_entries) == 1:
+            interface, expr = file_entries[0]
+            stack.enter_context(_temporary_decorator(file, interface.function_name, expr, line=interface.line))
+        else:
+            stack.enter_context(_temporary_decorators(file, file_entries))
     return stack
 
 
@@ -544,7 +750,7 @@ def _dedupe_disable_cuda_graph(cmd: str) -> str:
 
 
 def _windowing_mode(args: argparse.Namespace) -> str:
-    if args.forward_boundary_file and args.forward_boundary_function:
+    if args.forward_boundary_file and (args.forward_boundary_function or args.forward_boundary_line):
         return "forward_boundary"
     if getattr(args, "calls_per_forward", None):
         return "calls_per_forward"
@@ -552,15 +758,19 @@ def _windowing_mode(args: argparse.Namespace) -> str:
 
 
 class _temporary_decorator:
-    def __init__(self, target_file: Path, function_name: str, decorator_expr: str):
+    def __init__(self, target_file: Path, function_name: str, decorator_expr: str, *, line: int | None = None):
         self.target_file = target_file
         self.function_name = function_name
         self.decorator_expr = decorator_expr
+        self.line = line
         self.original = ""
 
     def __enter__(self):
         self.original = self.target_file.read_text(encoding="utf-8")
-        self.target_file.write_text(_insert_decorator(self.original, self.function_name, self.decorator_expr), encoding="utf-8")
+        self.target_file.write_text(
+            _insert_decorator(self.original, self.function_name, self.decorator_expr, line=self.line),
+            encoding="utf-8",
+        )
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -568,15 +778,40 @@ class _temporary_decorator:
         return False
 
 
-def _insert_decorator(source: str, function_name: str, decorator_expr: str) -> str:
+class _temporary_decorators:
+    def __init__(self, target_file: Path, entries: list[tuple[SourceInterface, str]]):
+        self.target_file = target_file
+        self.entries = entries
+        self.original = ""
+
+    def __enter__(self):
+        self.original = self.target_file.read_text(encoding="utf-8")
+        source = self.original
+        for interface, expr in sorted(self.entries, key=lambda item: item[0].line, reverse=True):
+            source = _insert_decorator(source, interface.function_name, expr, line=interface.line)
+        self.target_file.write_text(source, encoding="utf-8")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.target_file.write_text(self.original, encoding="utf-8")
+        return False
+
+
+def _insert_decorator(source: str, function_name: str, decorator_expr: str, *, line: int | None = None) -> str:
     lines = source.splitlines()
     needle = f"def {function_name}("
-    for idx, line in enumerate(lines):
-        stripped = line.lstrip()
-        if stripped.startswith(needle):
-            indent = line[: len(line) - len(stripped)]
+    async_needle = f"async def {function_name}("
+    target_line_idx = line - 1 if line is not None else None
+    for idx, source_line in enumerate(lines):
+        stripped = source_line.lstrip()
+        if stripped.startswith(needle) or stripped.startswith(async_needle):
+            if target_line_idx is not None and idx != target_line_idx:
+                continue
+            indent = source_line[: len(source_line) - len(stripped)]
             lines.insert(idx, f"{indent}@{decorator_expr}")
             return "\n".join(lines) + ("\n" if source.endswith("\n") else "")
+    if target_line_idx is not None:
+        raise ValueError(f"Could not find function definition {function_name!r} at line {line}")
     raise ValueError(f"Could not find function definition {function_name!r}")
 
 

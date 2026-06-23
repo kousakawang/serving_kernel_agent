@@ -100,16 +100,39 @@ python3 -m unittest kernel_agent.framework_engineer.tests.test_real_sglang_phase
 service_cmd = "python -m sglang.launch_server ..."
 workload_cmd = "python run_your_workload.py ..."
 target_file = "/path/to/gdn_triton.py"
+target_line = 123
+```
+
+也可以继续使用旧写法：
+
+```python
 function_name = "extend"
 target_name = "sglang...TritonGDNKernel.extend"
 ```
+
+推荐先用 CLI 验证行号解析结果：
+
+```bash
+python3 -m kernel_agent.framework_engineer.cli resolve-interface \
+  --file /path/to/sglang/python/sglang/srt/models/qwen3_5.py \
+  --line 123
+```
+
+输出会包含 `target_file`、`function_name`、`target_name`，并能识别 class method，例如
+`sglang.srt.models.qwen3_5.Qwen3_5ForCausalLM.forward`。
 
 可选但推荐配置 forward boundary，让 capture 能区分模型 forward window：
 
 ```python
 forward_boundary_file = "/path/to/backend_or_model.py"
-forward_boundary_function = "forward_extend"
-forward_boundary_name = "sglang...GDNAttnBackend.forward_extend"
+forward_boundary_line = 456
+```
+
+如果需要 override 自动推导的名字，可以额外设置：
+
+```python
+forward_boundary_function = "forward"
+forward_boundary_name = "sglang...Qwen3_5ForCausalLM.forward"
 ```
 
 完整模板见：

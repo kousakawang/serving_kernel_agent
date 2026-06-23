@@ -20,14 +20,16 @@ python /path/to/run_your_workload.py \
 """.strip()
 
 target_file = "/path/to/sglang/python/sglang/srt/layers/attention/linear/kernels/gdn_triton.py"
-function_name = "extend"
-target_name = "sglang.srt.layers.attention.linear.kernels.gdn_triton.TritonGDNKernel.extend"
+target_line = None  # Preferred: line inside the target function or on its `def`.
+function_name = "extend"  # Optional when target_line is set.
+target_name = "sglang.srt.layers.attention.linear.kernels.gdn_triton.TritonGDNKernel.extend"  # Optional override.
 
 # Optional but recommended: a higher-level forward/module/backend function that
 # wraps repeated target kernel calls for one model forward window.
 forward_boundary_file = None
+forward_boundary_line = None  # Preferred: line inside the boundary function or on its `def`.
 forward_boundary_function = None
-forward_boundary_name = None
+forward_boundary_name = None  # Optional override.
 
 # Optional task output.
 task_id = "qwen35_gdn_extend_core_h20_real"
@@ -62,6 +64,7 @@ mutable_arg_paths = ["kwargs.ssm_states"]
 # FLA chunk free functions usually use:
 #
 # target_file = "/path/to/sglang/python/sglang/srt/layers/attention/fla/chunk_fwd.py"
+# target_line = 123
 # function_name = "chunk_gated_delta_rule_fwd_intra"
 # target_name = "sglang.srt.layers.attention.fla.chunk_fwd.chunk_gated_delta_rule_fwd_intra"
 # drop_first_arg = False

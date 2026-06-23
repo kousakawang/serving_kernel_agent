@@ -30,6 +30,8 @@ class Phase1CliEndToEndTests(unittest.TestCase):
 
             service_cmd = f"{sys.executable} {service_file}"
             workload_cmd = f"{sys.executable} {workload_file}"
+            target_line = self._line_for(target_file, "def extend(self, *, values, state):")
+            boundary_line = self._line_for(target_file, "def forward_window(self, values):")
 
             self._run_cli("scaffold-task-pack", "--task-id", "toy_extend", "--out", str(task_pack))
 
@@ -56,26 +58,27 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 workload_cmd,
                 "--target-file",
                 str(target_file),
-                "--function-name",
-                "extend",
-                "--target-name",
-                "toy_kernel.extend",
+                "--target-line",
+                str(target_line),
+                "--drop-first-arg",
                 "--forward-boundary-file",
                 str(target_file),
-                "--forward-boundary-function",
-                "forward_window",
-                "--forward-boundary-name",
-                "toy_kernel.forward_window",
+                "--forward-boundary-line",
+                str(boundary_line),
                 "--startup-timeout",
                 "1",
             )
             self.assertEqual(probe["call_count"], 6)
+            self.assertEqual(probe["target_interface"]["function_name"], "extend")
+            self.assertEqual(probe["target_interface"]["qualified_name"], "toy_kernel.Worker.extend")
+            self.assertEqual(probe["forward_boundary_interface"]["qualified_name"], "toy_kernel.Worker.forward_window")
             probe_rows = [
                 json.loads(line)
                 for line in (task_pack / "docs" / "target_call_probe.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            self.assertEqual(probe_rows[0]["positional_arg_count"], 0)
+            self.assertEqual(probe_rows[0]["positional_arg_count"], 1)
+            self.assertEqual(probe_rows[0]["captured_positional_arg_count"], 0)
             self.assertEqual(probe_rows[0]["kwarg_count"], 2)
             self.assertIsNotNone(probe_rows[0]["forward_id"])
             self.assertIn("--disable-cuda-graph", probe["service_cmd"])
@@ -90,20 +93,17 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 workload_cmd,
                 "--target-file",
                 str(target_file),
-                "--function-name",
-                "extend",
-                "--target-name",
-                "toy_kernel.extend",
+                "--target-line",
+                str(target_line),
                 "--signature",
                 "candidate(*args, **kwargs)",
                 "--mutable-arg-path",
                 "kwargs.state.total",
+                "--drop-first-arg",
                 "--forward-boundary-file",
                 str(target_file),
-                "--forward-boundary-function",
-                "forward_window",
-                "--forward-boundary-name",
-                "toy_kernel.forward_window",
+                "--forward-boundary-line",
+                str(boundary_line),
                 "--max-capture-groups",
                 "8",
                 "--max-samples-per-group",
@@ -158,6 +158,16 @@ class Phase1CliEndToEndTests(unittest.TestCase):
             self.assertEqual(shape_list["source"], "snapshots/manifest.json")
             self.assertEqual(len(shape_list["shape_groups"]), 1)
 
+            resolved = self._run_cli(
+                "resolve-interface",
+                "--file",
+                str(target_file),
+                "--line",
+                str(target_line),
+            )
+            self.assertEqual(resolved["function_name"], "extend")
+            self.assertEqual(resolved["target_name"], "toy_kernel.Worker.extend")
+
     def _run_cli(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join([str(PROJECT_ROOT), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
@@ -183,15 +193,27 @@ class Phase1CliEndToEndTests(unittest.TestCase):
         path.write_text(
             textwrap.dedent(
                 """
-                def extend(*, values, state):
-                    state["total"] += sum(values)
-                    return {"out": [v + 1 for v in values], "total": state["total"]}
+                class Other:
+                    def forward_window(self):
+                        return "not the boundary"
 
 
-                def forward_window(values):
-                    extend(values=values, state={"total": 0})
-                    extend(values=values, state={"total": 0})
-                    extend(values=values, state={"total": 0})
+                class Worker:
+                    def extend(self, *, values, state):
+                        state["total"] += sum(values)
+                        return {"out": [v + 1 for v in values], "total": state["total"]}
+
+                    def forward_window(self, values):
+                        self.extend(values=values, state={"total": 0})
+                        self.extend(values=values, state={"total": 0})
+                        self.extend(values=values, state={"total": 0})
+
+
+                _WORKER = Worker()
+
+
+                def run(values):
+                    _WORKER.forward_window(values)
                 """
             ),
             encoding="utf-8",
@@ -208,12 +230,19 @@ class Phase1CliEndToEndTests(unittest.TestCase):
 
                 import toy_kernel
 
-                toy_kernel.forward_window([1, 2, 3])
-                toy_kernel.forward_window([1, 2, 3])
+                toy_kernel.run([1, 2, 3])
+                toy_kernel.run([1, 2, 3])
                 """
             ),
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _line_for(path: Path, needle: str) -> int:
+        for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if needle in line:
+                return idx
+        raise AssertionError(f"missing line containing {needle!r}")
 
 
 if __name__ == "__main__":
