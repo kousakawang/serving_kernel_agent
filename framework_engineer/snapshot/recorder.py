@@ -419,6 +419,7 @@ def make_snapshot_decorator(
     backend: str = "",
     layer_id: str = "",
     drop_first_arg: bool = False,
+    source_info: dict[str, Any] | None = None,
     calls_per_forward: int | str | None = None,
     max_capture_groups: int | str = 64,
     max_samples_per_group: int | str = 8,
@@ -431,6 +432,7 @@ def make_snapshot_decorator(
         "mode": mode or None,
         "backend": backend or None,
         "layer_id": int(layer_id) if str(layer_id).isdigit() else None,
+        "source": source_info or {},
     }
     recorder = SnapshotRecorder(
         SnapshotStore(Path(snapshot_root)),

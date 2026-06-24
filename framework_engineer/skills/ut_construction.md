@@ -31,6 +31,18 @@ post-state 是语义的一部分时才需要配置。不存在于 captured input
 
 如果 reference 不能脱离 SGLang 独立 import，允许使用 snapshot-golden fallback。此时 reference 返回 captured outputs，并把 mutable inputs 更新到 captured post-state。
 
+## Reference / Original 实现
+
+`generate-harness` 必须生成两类 reference：
+
+- `original_impl.py`：尝试导入并调用 capture 时的原始 target，用作 benchmark baseline。
+- `reference_impl.snapshot_reference(...)`：只返回 captured outputs，用作 snapshot-golden correctness fallback。
+
+`reference_impl.reference(...)` 默认调用 `original_impl.original(...)`。如果原始 target
+是 instance method 且 task pack 无法重建 framework-owned `self`，benchmark reference
+会明确失败；此时 Framework Engineer 需要换到 tensor-level free function、提供 wrapper，
+或接受该任务只能做 snapshot-golden correctness，不能做原始实现 benchmark。
+
 ## Benchmark 规则
 
 - reference 和 candidate 使用同一批 selected snapshots。
@@ -41,7 +53,9 @@ post-state 是语义的一部分时才需要配置。不存在于 captured input
 
 ## Candidate 初始状态
 
-`candidate_impl.py` 初始版本应该直接调用 `reference_impl.py`，确保 task pack 初始 correctness pass。Kernel Engineer 接手后只替换 candidate 实现。
+`candidate_impl.py` 初始版本应该优先调用 `original_impl.original(...)`，让初始 benchmark
+得到真实 baseline；如果原始 target 不可用，则只在 correctness fallback 中调用
+`snapshot_reference(...)`。Kernel Engineer 接手后只替换 candidate 实现。
 
 ## 交付给 Kernel Agent 的内容
 
@@ -50,6 +64,7 @@ post-state 是语义的一部分时才需要配置。不存在于 captured input
 - `snapshot_runtime.py`
 - `snapshots/manifest.json`
 - `snapshots/selected/<group_id>/samples/<sample_id>`
+- `original_impl.py`
 - `reference_impl.py`
 - `candidate_impl.py`
 - `correctness_test.py`

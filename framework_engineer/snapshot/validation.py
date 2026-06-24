@@ -15,6 +15,7 @@ REQUIRED_TASK_PACK_FILES = [
     "env_manifest.yaml",
     "snapshot_runtime.py",
     "snapshots/manifest.json",
+    "original_impl.py",
     "reference_impl.py",
     "candidate_impl.py",
     "correctness_test.py",

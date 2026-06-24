@@ -292,6 +292,7 @@ def cmd_capture_snapshots(args: argparse.Namespace) -> int:
         f"{str(snapshot_root)!r}, {args.task_pack.name!r}, {target.qualified_name!r}, {args.signature!r}, "
         f"mutable_arg_paths={mutable_paths!r}, mode={args.mode!r}, backend={args.backend!r}, "
         f"layer_id={args.layer_id!r}, drop_first_arg={bool(args.drop_first_arg)!r}, "
+        f"source_info={target.to_dict()!r}, "
         f"calls_per_forward={args.calls_per_forward!r}, max_capture_groups={max_capture_groups!r}, "
         f"max_samples_per_group={args.max_samples_per_group!r}, "
         f"max_samples_per_forward_per_group={args.max_samples_per_forward_per_group!r})"

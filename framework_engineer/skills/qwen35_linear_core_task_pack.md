@@ -69,6 +69,7 @@ task_pack/
   snapshots/
     manifest.json
     selected/
+  original_impl.py
   reference_impl.py
   candidate_impl.py
   correctness_test.py

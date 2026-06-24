@@ -314,12 +314,7 @@ class RealSGLangPhase1CliTests(unittest.TestCase):
     def _target_locator_args(self) -> list[str]:
         cfg = self.cfg
         if cfg.target_line is not None:
-            args = ["--target-line", str(cfg.target_line)]
-            if cfg.function_name:
-                args.extend(["--function-name", cfg.function_name])
-            if cfg.target_name:
-                args.extend(["--target-name", cfg.target_name])
-            return args
+            return ["--target-line", str(cfg.target_line)]
         args = ["--function-name", str(cfg.function_name)]
         if cfg.target_name:
             args.extend(["--target-name", cfg.target_name])

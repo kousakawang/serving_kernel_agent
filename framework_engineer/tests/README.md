@@ -121,6 +121,9 @@ python3 -m kernel_agent.framework_engineer.cli resolve-interface \
 输出会包含 `target_file`、`function_name`、`target_name`，并能识别 class method，例如
 `sglang.srt.models.qwen3_5.Qwen3_5ForCausalLM.forward`。
 
+当 `target_line` 已设置时，真实测试只会把 `target_file + target_line` 传给 CLI；
+`function_name` 和 `target_name` 不需要手动填写。
+
 可选但推荐配置 forward boundary，让 capture 能区分模型 forward window：
 
 ```python
@@ -166,6 +169,10 @@ cli_tests = {
 6. `generate-harness`
 7. 可选 `probe-env`
 8. `validate-task-pack --run-correctness`
+
+`generate-harness` 会生成 `original_impl.py` 作为 benchmark reference，默认调用
+capture 时的原始 target。`snapshot-golden` 只用于 correctness fallback，不能作为
+性能 baseline。
 
 如果当前只想测试 snapshot/harness，不想跑 baseline：
 

@@ -21,8 +21,8 @@ python /path/to/run_your_workload.py \
 
 target_file = "/path/to/sglang/python/sglang/srt/layers/attention/linear/kernels/gdn_triton.py"
 target_line = None  # Preferred: line inside the target function or on its `def`.
-function_name = "extend"  # Optional when target_line is set.
-target_name = "sglang.srt.layers.attention.linear.kernels.gdn_triton.TritonGDNKernel.extend"  # Optional override.
+function_name = None  # Legacy fallback when target_line is not set.
+target_name = None  # Optional legacy override when function_name is used.
 
 # Optional but recommended: a higher-level forward/module/backend function that
 # wraps repeated target kernel calls for one model forward window.

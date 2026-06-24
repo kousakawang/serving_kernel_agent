@@ -30,7 +30,7 @@ class Phase1CliEndToEndTests(unittest.TestCase):
 
             service_cmd = f"{sys.executable} {service_file}"
             workload_cmd = f"{sys.executable} {workload_file}"
-            target_line = self._line_for(target_file, "def extend(self, *, values, state):")
+            target_line = self._line_for(target_file, "def extend(*, values, state):")
             boundary_line = self._line_for(target_file, "def forward_window(self, values):")
 
             self._run_cli("scaffold-task-pack", "--task-id", "toy_extend", "--out", str(task_pack))
@@ -60,7 +60,6 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 str(target_file),
                 "--target-line",
                 str(target_line),
-                "--drop-first-arg",
                 "--forward-boundary-file",
                 str(target_file),
                 "--forward-boundary-line",
@@ -70,14 +69,14 @@ class Phase1CliEndToEndTests(unittest.TestCase):
             )
             self.assertEqual(probe["call_count"], 6)
             self.assertEqual(probe["target_interface"]["function_name"], "extend")
-            self.assertEqual(probe["target_interface"]["qualified_name"], "toy_kernel.Worker.extend")
+            self.assertEqual(probe["target_interface"]["qualified_name"], "toy_kernel.extend")
             self.assertEqual(probe["forward_boundary_interface"]["qualified_name"], "toy_kernel.Worker.forward_window")
             probe_rows = [
                 json.loads(line)
                 for line in (task_pack / "docs" / "target_call_probe.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            self.assertEqual(probe_rows[0]["positional_arg_count"], 1)
+            self.assertEqual(probe_rows[0]["positional_arg_count"], 0)
             self.assertEqual(probe_rows[0]["captured_positional_arg_count"], 0)
             self.assertEqual(probe_rows[0]["kwarg_count"], 2)
             self.assertIsNotNone(probe_rows[0]["forward_id"])
@@ -101,7 +100,6 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 "kwargs.state.total",
                 "--mutable-arg-path",
                 "kwargs.ssm_states",
-                "--drop-first-arg",
                 "--forward-boundary-file",
                 str(target_file),
                 "--forward-boundary-line",
@@ -182,7 +180,7 @@ class Phase1CliEndToEndTests(unittest.TestCase):
                 str(target_line),
             )
             self.assertEqual(resolved["function_name"], "extend")
-            self.assertEqual(resolved["target_name"], "toy_kernel.Worker.extend")
+            self.assertEqual(resolved["target_name"], "toy_kernel.extend")
 
     def _run_cli(self, *args: str, extra_env: dict[str, str] | None = None) -> dict:
         env = os.environ.copy()
@@ -209,20 +207,21 @@ class Phase1CliEndToEndTests(unittest.TestCase):
         path.write_text(
             textwrap.dedent(
                 """
+                def extend(*, values, state):
+                    state["total"] += sum(values)
+                    return {"out": [v + 1 for v in values], "total": state["total"]}
+
+
                 class Other:
                     def forward_window(self):
                         return "not the boundary"
 
 
                 class Worker:
-                    def extend(self, *, values, state):
-                        state["total"] += sum(values)
-                        return {"out": [v + 1 for v in values], "total": state["total"]}
-
                     def forward_window(self, values):
-                        self.extend(values=values, state={"total": 0})
-                        self.extend(values=values, state={"total": 0})
-                        self.extend(values=values, state={"total": 0})
+                        extend(values=values, state={"total": 0})
+                        extend(values=values, state={"total": 0})
+                        extend(values=values, state={"total": 0})
 
 
                 _WORKER = Worker()
