@@ -35,13 +35,14 @@ post-state 是语义的一部分时才需要配置。不存在于 captured input
 
 `generate-harness` 必须生成两类 reference：
 
-- `original_impl.py`：尝试导入并调用 capture 时的原始 target，用作 benchmark baseline。
+- `original_source/`：复制 capture 时目标接口所在源码，作为 Kernel Engineer 阅读参考。
+- `original_impl.py`：尝试通过原框架环境 linked import 并调用 capture 时的原始 target，用作 benchmark baseline。
 - `reference_impl.snapshot_reference(...)`：只返回 captured outputs，用作 snapshot-golden correctness fallback。
 
 `reference_impl.reference(...)` 默认调用 `original_impl.original(...)`。如果原始 target
-是 instance method 且 task pack 无法重建 framework-owned `self`，benchmark reference
-会明确失败；此时 Framework Engineer 需要换到 tensor-level free function、提供 wrapper，
-或接受该任务只能做 snapshot-golden correctness，不能做原始实现 benchmark。
+是 instance method 且 task pack 无法重建 framework-owned `self`，或当前环境缺少 SGLang/vLLM
+等框架依赖，benchmark 的 reference 分支会标记 unavailable。此时 task pack 仍然有效，
+Kernel Engineer 可以阅读 `original_source/`，并使用 candidate-only benchmark。
 
 ## Benchmark 规则
 
@@ -50,12 +51,16 @@ post-state 是语义的一部分时才需要配置。不存在于 captured input
 - reset/clone/copy 不计入 timed region。
 - CUDA event timing 优先；CPU timer 只作为 fallback。
 - 输出 JSONL，包含 group_id、sample_id、target、warmup、repeat、median_us、mean_us、min_us、max_us，并输出 group summary。
+- `--target reference` 要求 linked original 可执行；`--target both` 会尽量运行 reference，
+  reference 不可用时记录错误并继续运行 candidate；`--target candidate` 是正式支持的
+  candidate-only 路径。
 
 ## Candidate 初始状态
 
 `candidate_impl.py` 初始版本应该优先调用 `original_impl.original(...)`，让初始 benchmark
-得到真实 baseline；如果原始 target 不可用，则只在 correctness fallback 中调用
-`snapshot_reference(...)`。Kernel Engineer 接手后只替换 candidate 实现。
+得到真实 baseline；如果原始 target 不可用，则 fallback 到 `snapshot_reference(...)`，用于
+让初始 correctness smoke pass。Kernel Engineer 接手后只替换 candidate 实现，正式性能结果
+必须来自真实 candidate kernel。
 
 ## 交付给 Kernel Agent 的内容
 
@@ -64,6 +69,8 @@ post-state 是语义的一部分时才需要配置。不存在于 captured input
 - `snapshot_runtime.py`
 - `snapshots/manifest.json`
 - `snapshots/selected/<group_id>/samples/<sample_id>`
+- `original_source/manifest.json`
+- `original_source/<copied_target_source>`
 - `original_impl.py`
 - `reference_impl.py`
 - `candidate_impl.py`

@@ -11,7 +11,8 @@ Kernel Engineer should optimize only the candidate implementation under the ABI 
 - `shape_list.json`: summary/index derived from selected snapshots, not the replay source.
 - `snapshot_runtime.py`: standalone replay runtime copied into this task pack.
 - `env_manifest.yaml`: available implementation/profiling environment.
-- `original_impl.py`: original captured target replay used as benchmark baseline.
+- `original_source/`: copied source reference for the captured target.
+- `original_impl.py`: linked replay of the captured target through the original framework environment.
 - `reference_impl.py`: reference entry plus snapshot-golden correctness fallback.
 - `candidate_impl.py`: Kernel Engineer implementation entry.
 - `correctness_test.py`: correctness harness. Do not relax tolerance.
@@ -34,6 +35,7 @@ Kernel Engineer must not edit:
 - `snapshots/`
 - `snapshot_runtime.py`
 - `shape_list.json`
+- `original_source/`
 - `original_impl.py`
 - `reference_impl.py`
 - `correctness_test.py`
@@ -45,6 +47,12 @@ Kernel Engineer must not edit:
 ```bash
 bash scripts/run_correctness.sh
 bash scripts/run_benchmark.sh
+```
+
+If linked original replay is unavailable in the current environment, run candidate-only benchmark:
+
+```bash
+TARGET=candidate bash scripts/run_benchmark.sh
 ```
 
 If either command fails before candidate work begins, return a task acceptance review to Framework Engineer.

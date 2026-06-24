@@ -14,6 +14,7 @@ REQUIRED_TASK_PACK_FILES = [
     "shape_list.json",
     "env_manifest.yaml",
     "snapshot_runtime.py",
+    "original_source/manifest.json",
     "snapshots/manifest.json",
     "original_impl.py",
     "reference_impl.py",

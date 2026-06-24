@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,12 @@ class SnapshotTests(unittest.TestCase):
         recorder = SnapshotRecorder(
             store,
             task_id=task_id,
-            target={"qualified_name": "toy.extend", "logical_name": "extend", "mode": "extend", "backend": "test"},
+            target={
+                "qualified_name": "kernel_agent_missing_original_for_test.extend",
+                "logical_name": "extend",
+                "mode": "extend",
+                "backend": "test",
+            },
             signature="candidate(*args, **kwargs)",
             mutable_arg_paths=["kwargs.state.total"],
             max_capture_groups=8,
@@ -87,6 +93,9 @@ class SnapshotTests(unittest.TestCase):
             manifest = SnapshotSelector(store).select(max_groups=1, max_samples_per_group=4)
             write_shape_list_summary(task_pack, manifest)
             SnapshotHarnessBuilder(task_pack).generate()
+            original_manifest = json.loads((task_pack / "original_source" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertFalse(original_manifest["source_available"])
+            self.assertFalse(original_manifest["executable"])
             proc = subprocess.run(
                 [sys.executable, "correctness_test.py", "--device", "cpu"],
                 cwd=task_pack,
@@ -97,6 +106,48 @@ class SnapshotTests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn('"status": "PASS"', proc.stdout)
+            bench = subprocess.run(
+                [
+                    sys.executable,
+                    "benchmark.py",
+                    "--device",
+                    "cpu",
+                    "--target",
+                    "candidate",
+                    "--warmup",
+                    "1",
+                    "--repeat",
+                    "2",
+                ],
+                cwd=task_pack,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(bench.returncode, 0, bench.stderr)
+            self.assertIn('"candidate"', bench.stdout)
+            both = subprocess.run(
+                [
+                    sys.executable,
+                    "benchmark.py",
+                    "--device",
+                    "cpu",
+                    "--target",
+                    "both",
+                    "--warmup",
+                    "1",
+                    "--repeat",
+                    "2",
+                ],
+                cwd=task_pack,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(both.returncode, 0, both.stderr)
+            self.assertIn('"reference": {"available": false', both.stdout)
 
 
 if __name__ == "__main__":

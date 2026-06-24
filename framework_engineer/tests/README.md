@@ -170,9 +170,11 @@ cli_tests = {
 7. 可选 `probe-env`
 8. `validate-task-pack --run-correctness`
 
-`generate-harness` 会生成 `original_impl.py` 作为 benchmark reference，默认调用
-capture 时的原始 target。`snapshot-golden` 只用于 correctness fallback，不能作为
-性能 baseline。
+`generate-harness` 会复制目标源码到 `original_source/` 供阅读，并生成 linked
+`original_impl.py` 作为 benchmark reference，默认调用 capture 时的原始 target。
+`snapshot-golden` 只用于 correctness fallback，不能作为性能 baseline。若 linked
+original 因框架依赖、instance method `self` 等原因不可用，可以先用
+`TARGET=candidate bash scripts/run_benchmark.sh` 跑 candidate-only benchmark。
 
 如果当前只想测试 snapshot/harness，不想跑 baseline：
 

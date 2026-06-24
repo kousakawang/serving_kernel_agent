@@ -30,6 +30,7 @@ kernel_abi:
     - "Do not change snapshots/"
     - "Do not change snapshot_runtime.py"
     - "Do not change shape_list.json except via Framework Engineer snapshot selection"
+    - "Do not change original_source/"
     - "Do not change original_impl.py"
     - "Do not change reference_impl.py"
     - "Do not relax tolerance in correctness_test.py"

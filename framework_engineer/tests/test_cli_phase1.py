@@ -134,6 +134,16 @@ class Phase1CliEndToEndTests(unittest.TestCase):
 
             self._run_cli("generate-harness", "--task-pack", str(task_pack))
 
+            original_source_manifest = json.loads(
+                (task_pack / "original_source" / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(original_source_manifest["source_available"])
+            self.assertTrue(original_source_manifest["executable"])
+            self.assertEqual(original_source_manifest["target_info"]["qualified_name"], "toy_kernel.extend")
+            copied_source = task_pack / original_source_manifest["copied_file"]
+            self.assertTrue(copied_source.exists())
+            self.assertIn("def extend", copied_source.read_text(encoding="utf-8"))
+
             validate = self._run_cli(
                 "validate-task-pack",
                 "--task-pack",

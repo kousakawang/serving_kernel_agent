@@ -66,6 +66,9 @@ task_pack/
   shape_list.json
   env_manifest.yaml
   snapshot_runtime.py
+  original_source/
+    manifest.json
+    <copied_target_source>
   snapshots/
     manifest.json
     selected/
@@ -88,4 +91,12 @@ bash scripts/run_correctness.sh
 bash scripts/run_benchmark.sh
 ```
 
-如果这两条命令不能运行，task pack 不完整。
+`run_correctness.sh` 默认使用 snapshot-golden mode，必须能运行。`run_benchmark.sh`
+默认会尝试 linked original reference；如果当前环境无法导入原框架或目标是无法重建
+`self` 的 instance method，可以使用：
+
+```bash
+TARGET=candidate bash scripts/run_benchmark.sh
+```
+
+此时 `original_source/` 仍然作为 kernel engineer 阅读原始实现的参考材料。

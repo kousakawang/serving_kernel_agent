@@ -149,7 +149,7 @@ def cmd_scaffold_task_pack(args: argparse.Namespace) -> int:
     if out.exists() and any(out.iterdir()) and not args.force:
         raise SystemExit(f"{out} already exists and is not empty; pass --force to overwrite scaffold files.")
     out.mkdir(parents=True, exist_ok=True)
-    for rel in ("docs", "scripts", "snapshots/raw", "snapshots/selected", "env_probe", "kernel_sources"):
+    for rel in ("docs", "scripts", "snapshots/raw", "snapshots/selected", "env_probe", "kernel_sources", "original_source"):
         (out / rel).mkdir(parents=True, exist_ok=True)
 
     _copy_template("task_pack_README.md", out / "README.md")
